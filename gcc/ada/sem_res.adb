@@ -1821,7 +1821,7 @@ package body Sem_Res is
                      Orig_Type := Type_In_P (Is_Composite_Type'Access);
 
                      if Present (Orig_Type) then
-                        if Has_Private_Component (Orig_Type) then
+                        if Is_Incompletely_Defined (Orig_Type) then
                            Orig_Type := Empty;
                         else
                            Set_Etype (Act1, Orig_Type);
@@ -2053,7 +2053,7 @@ package body Sem_Res is
       Parent_Id : Node_Id;
    begin
       if Nkind (IBT_Decl) = N_Full_Type_Declaration
-        and then Original_Node (IBT_Decl) /= IBT_Decl
+        and then Is_Rewrite_Substitution (IBT_Decl)
         and then Nkind (Original_Node (IBT_Decl)) =
                  N_Full_Type_Declaration
         and then Nkind (Type_Definition (Original_Node (IBT_Decl)))
@@ -3589,11 +3589,6 @@ package body Sem_Res is
          --  default expression mode (the Freeze_Expression routine tests this
          --  flag and only freezes static types if it is set).
 
-         --  Ada 2012 (AI05-177): The declaration of an expression function
-         --  does not cause freezing, but we never reach here in that case.
-         --  Here we are resolving the corresponding expanded body, so we do
-         --  need to perform normal freezing.
-
          --  As elsewhere we do not emit freeze node within a generic.
 
          if not Inside_A_Generic then
@@ -3772,31 +3767,35 @@ package body Sem_Res is
 
             elsif Ekind (Etype (Nam)) = E_Anonymous_Access_Type
               and then Nkind (Parent (N)) = N_Type_Conversion
-              and then Type_Access_Level (Etype (Parent (N)))
-                         < Static_Accessibility_Level (A, Object_Decl_Level)
+              and then
+                Type_Access_Level (Etype (Parent (N)))
+                  < Static_Accessibility_Level (A, Zero_On_Dynamic_Level)
             then
                Accessibility_Error ("conversion");
 
             elsif Ekind (Etype (Nam)) = E_Anonymous_Access_Type
               and then Nkind (Parent (N)) = N_Assignment_Statement
-              and then Static_Accessibility_Level
-                         (Name (Parent (N)), Object_Decl_Level)
-                           < Static_Accessibility_Level (A, Object_Decl_Level)
+              and then
+                Static_Accessibility_Level
+                  (Name (Parent (N)), Object_Decl_Level)
+                    < Static_Accessibility_Level (A, Zero_On_Dynamic_Level)
             then
                Accessibility_Error ("assignment");
 
             elsif Nkind (Parent (N)) = N_Qualified_Expression
               and then Nkind (Parent (Parent (N))) = N_Allocator
-              and then Type_Access_Level (Etype (Parent (Parent (N))))
-                         < Static_Accessibility_Level (A, Object_Decl_Level)
+              and then
+                Type_Access_Level (Etype (Parent (Parent (N))))
+                  < Static_Accessibility_Level (A, Zero_On_Dynamic_Level)
             then
                Accessibility_Error ("allocator");
 
             elsif In_Return_Value (N)
               and then Comes_From_Source (N)
-              and then Subprogram_Access_Level (Current_Subprogram)
-                         < Static_Accessibility_Level
-                             (A, Object_Decl_Level, In_Return_Context => True)
+              and then
+                Subprogram_Access_Level (Current_Subprogram)
+                  < Static_Accessibility_Level
+                      (A, Zero_On_Dynamic_Level, In_Return_Context => True)
             then
                Accessibility_Error ("return");
             end if;
@@ -4518,51 +4517,47 @@ package body Sem_Res is
                   end if;
                end if;
 
-               --  (Ada 2005: AI-251): If the actual is an allocator whose
-               --  directly designated type is a class-wide interface, we build
-               --  an anonymous access type to use it as the type of the
-               --  allocator. Later, when the subprogram call is expanded, if
-               --  the interface has a secondary dispatch table the expander
-               --  will add a type conversion to force the correct displacement
-               --  of the pointer.
-
                if Nkind (A) = N_Allocator then
                   declare
                      DDT : constant Entity_Id :=
                              Directly_Designated_Type (Base_Type (Etype (F)));
 
                   begin
-                     --  Displace the pointer to the object to reference its
-                     --  secondary dispatch table.
+                     --  Ada 2005, AI-251: If the actual is an allocator whose
+                     --  directly designated type is a class-wide interface, we
+                     --  build a type conversion to force the displacement of
+                     --  the pointer to reference the secondary dispatch table.
+                     --  Note that we need to resolve the allocator explicitly,
+                     --  otherwise its E_Allocator_Type will never be replaced,
+                     --  since it's now the operand of a type conversion.
 
                      if Is_Class_Wide_Type (DDT)
                        and then Is_Interface (DDT)
                      then
-                        Rewrite (A, Convert_To (Etype (F), Relocate_Node (A)));
+                        Convert_To_And_Rewrite (Etype (F), A);
                         Flag_Interface_Pointer_Displacement (A);
-
-                        Analyze_And_Resolve (A, Etype (F),
-                          Suppress => Access_Check);
+                        Resolve (Expression (A), Etype (F));
+                        Analyze_And_Resolve
+                          (A, Etype (F), Suppress => Access_Check);
                      end if;
 
-                     --  Ada 2005, AI-162:If the actual is an allocator, the
-                     --  innermost enclosing statement is the master of the
-                     --  created object. This needs to be done with expansion
-                     --  enabled only, otherwise the transient scope will not
-                     --  be removed in the expansion of the wrapped construct.
+                     --  Ada 2005, AI-162: If the actual of an access parameter
+                     --  is an allocator, the innermost enclosing statement is
+                     --  the master of the created object. When the expander is
+                     --  active, establish a transient scope to embody it.
 
-                     if Expander_Active
-                       and then (Needs_Finalization (DDT)
-                                  or else Has_Task (DDT))
-                     then
-                        Establish_Transient_Scope
-                          (A, Manage_Sec_Stack => False);
+                     if Ekind (Etype (F)) = E_Anonymous_Access_Type then
+                        Check_Restriction (No_Access_Parameter_Allocators, A);
+
+                        if Expander_Active
+                          and then (Needs_Finalization (DDT)
+                                     or else Might_Have_Tasks (DDT))
+                        then
+                           Establish_Transient_Scope
+                             (A, Manage_Sec_Stack => False);
+                        end if;
                      end if;
                   end;
-
-                  if Ekind (Etype (F)) = E_Anonymous_Access_Type then
-                     Check_Restriction (No_Access_Parameter_Allocators, A);
-                  end if;
                end if;
 
                --  (Ada 2005): The call may be to a primitive operation of a
@@ -4817,9 +4812,16 @@ package body Sem_Res is
                --  component may initialize a nested component of a constant
                --  designated object. In this context the object is variable.
 
+               --  Similarly, a constructor may be invoked to initialize a
+               --  constant variable, and this is allowed.
+
                if not Is_OK_Variable_For_Out_Formal (A)
-                 and then not Is_Init_Proc (Nam)
-                 and then not Is_Expanded_Constructor_Call (N)
+                 and then not
+                   (A = First_Actual (N)
+                      and then
+                        (Is_Init_Proc (Nam)
+                           or else Is_Constructor (Nam)
+                           or else Is_Expanded_Constructor_Call (N)))
                then
                   Error_Msg_NE ("actual for& must be a variable", A, F);
 
@@ -5512,12 +5514,8 @@ package body Sem_Res is
 
          if Is_Limited_Type (Etype (E))
            and then Comes_From_Source (N)
-           and then
-             (Comes_From_Source (Parent (N))
-               or else
-                 (Ekind (Current_Scope) = E_Function
-                   and then Nkind (Original_Node (Unit_Declaration_Node
-                              (Current_Scope))) = N_Expression_Function))
+           and then (Comes_From_Source (Parent (N))
+                      or else Is_Expression_Function (Current_Scope))
            and then not In_Instance_Body
          then
             if not OK_For_Limited_Init (Etype (E), Expression (E)) then
@@ -6663,28 +6661,22 @@ package body Sem_Res is
       --  conditions of subsequent functions or expression functions. Such
       --  calls do not freeze when they appear within generated bodies,
       --  (including the body of another expression function) which would
-      --  place the freeze node in the wrong scope. An expression function
-      --  is frozen in the usual fashion, by the appearance of a real body,
-      --  or at the end of a declarative part. However an implicit call to
+      --  place the freeze node in the wrong scope. But an implicit call to
       --  an expression function may appear when it is part of a default
       --  expression in a call to an initialization procedure, and must be
       --  frozen now, even if the body is inserted at a later point.
-      --  Otherwise, the call freezes the expression if expander is active,
-      --  for example as part of an object declaration.
 
       if Is_Entity_Name (Subp)
         and then not In_Spec_Expression
         and then not Is_Expression_Function_Or_Completion (Current_Scope)
-        and then not (Chars (Current_Scope) = Name_uWrapped_Statements
-                       and then Is_Expression_Function_Or_Completion
-                                  (Scope (Current_Scope)))
-        and then
-          (not Is_Expression_Function_Or_Completion (Entity (Subp))
-            or else Expander_Active)
+        and then not
+          (Chars (Current_Scope) = Name_uWrapped_Statements
+            and then
+              Is_Expression_Function_Or_Completion (Scope (Current_Scope)))
       then
          if Is_Expression_Function (Entity (Subp)) then
 
-            --  Force freeze of expression function in call
+            --  Force freezing of expression function in call
 
             Set_Comes_From_Source (Subp, True);
             Set_Must_Not_Freeze   (Subp, False);
@@ -6830,23 +6822,12 @@ package body Sem_Res is
 
       else
          --  If the called function is not declared in the main unit and it
-         --  returns the limited view of type then use the available view (as
-         --  is done in Try_Object_Operation) to prevent back-end confusion;
-         --  for the function entity itself. The call must appear in a context
-         --  where the nonlimited view is available. If the function entity is
-         --  in the extended main unit then no action is needed, because the
-         --  back end handles this case. In either case the type of the call
-         --  is the nonlimited view.
+         --  returns the limited view of a type, then use the available view
+         --  to prevent back-end confusion. The function call must appear in
+         --  a context where the nonlimited view is available.
 
-         if From_Limited_With (Etype (Nam))
-           and then Present (Available_View (Etype (Nam)))
-         then
+         if From_Limited_With (Etype (Nam)) then
             Set_Etype (N, Available_View (Etype (Nam)));
-
-            if not In_Extended_Main_Code_Unit (Nam) then
-               Set_Etype (Nam, Available_View (Etype (Nam)));
-            end if;
-
          else
             Set_Etype (N, Etype (Nam));
          end if;
@@ -7510,7 +7491,7 @@ package body Sem_Res is
                --  -gnatd_f is set.
 
                else
-                  if Debug_Flag_Underscore_F then
+                  if GNATprove_Inline_Success_Msg then
                      Error_Msg_NE
                        ("info: analyzing call to & in context?", N, Nam_UA);
                   end if;
@@ -7793,6 +7774,22 @@ package body Sem_Res is
    --  Start of processing for Resolve_Declare_Expression
 
    begin
+      --  Create a transient scope if the type of this declare-expression
+      --  or its expression requires it; this must be done before we push
+      --  in the scope stack the scope of this declare expression (in order
+      --  to properly remove it from the stack on exit from this routine).
+      --  Given that we don't know yet if secondary stack management will
+      --  be needed, we assume the worst case.
+
+      if Expander_Active
+        and then (Requires_Transient_Scope (Typ)
+                    or else Has_Sec_Stack_Call (Expr))
+      then
+         Establish_Transient_Scope (N, Manage_Sec_Stack => True);
+      end if;
+
+      Push_Scope (Scope_Link (N));
+
       Decl := First (Actions (N));
 
       while Present (Decl) loop
@@ -7857,6 +7854,9 @@ package body Sem_Res is
             Next_Elmt (Cursor);
          end loop;
       end;
+
+      pragma Assert (Current_Scope = Scope_Link (N));
+      End_Scope;
    end Resolve_Declare_Expression;
 
    -----------------------------------
@@ -8160,16 +8160,12 @@ package body Sem_Res is
            and then not Is_Imported (E)
            and then Nkind (Parent (E)) /= N_Object_Renaming_Declaration
            and then not Needs_Construction (Etype (E))
+           and then not No_Initialization (Parent (E))
+           and then not (Present (Full_View (E))
+                          and then No_Initialization (Parent (Full_View (E))))
          then
-            if No_Initialization (Parent (E))
-              or else (Present (Full_View (E))
-                        and then No_Initialization (Parent (Full_View (E))))
-            then
-               null;
-            else
-               Error_Msg_N
-                 ("deferred constant is frozen before completion", N);
-            end if;
+            Error_Msg_NE
+              ("deferred constant& is frozen before completion", N, E);
          end if;
 
          Eval_Entity_Name (N);
@@ -11669,7 +11665,6 @@ package body Sem_Res is
       B_Typ : constant Entity_Id := Base_Type (Typ);
       L     : constant Node_Id   := Left_Opnd  (N);
       R     : constant Node_Id   := Right_Opnd (N);
-
    begin
       --  Ensure all actions associated with the left operand (e.g.
       --  finalization of transient objects) are fully evaluated locally within
@@ -11697,101 +11692,6 @@ package body Sem_Res is
 
       Resolve (L, B_Typ);
       Resolve (R, B_Typ);
-
-      --  Check for issuing warning for always False assert/check, this happens
-      --  when assertions are turned off, in which case the pragma Assert/Check
-      --  was transformed into:
-
-      --     if False and then <condition> then ...
-
-      --  and we detect this pattern
-
-      if Warn_On_Assertion_Failure
-        and then Is_Entity_Name (R)
-        and then Entity (R) = Standard_False
-        and then Nkind (Parent (N)) = N_If_Statement
-        and then Nkind (N) = N_And_Then
-        and then Is_Entity_Name (L)
-        and then Entity (L) = Standard_False
-      then
-         declare
-            Orig : constant Node_Id := Original_Node (Parent (N));
-
-         begin
-            --  Special handling of Asssert pragma
-
-            if Nkind (Orig) = N_Pragma
-              and then Pragma_Name (Orig) = Name_Assert
-            then
-               declare
-                  Expr : constant Node_Id :=
-                           Original_Node
-                             (Expression
-                               (First (Pragma_Argument_Associations (Orig))));
-
-               begin
-                  --  Don't warn if original condition is explicit False,
-                  --  since obviously the failure is expected in this case.
-
-                  if Is_Entity_Name (Expr)
-                    and then Entity (Expr) = Standard_False
-                  then
-                     null;
-
-                  --  Issue warning. We do not want the deletion of the
-                  --  IF/AND-THEN to take this message with it. We achieve this
-                  --  by making sure that the expanded code points to the Sloc
-                  --  of the expression, not the original pragma.
-
-                  else
-                     --  Note: Use Error_Msg_F here rather than Error_Msg_N.
-                     --  The source location of the expression is not usually
-                     --  the best choice here. For example, it gets located on
-                     --  the last AND keyword in a chain of boolean expressiond
-                     --  AND'ed together. It is best to put the message on the
-                     --  first character of the assertion, which is the effect
-                     --  of the First_Node call here.
-
-                     Error_Msg_F
-                       ("?.a?assertion would fail at run time!",
-                        Expression
-                          (First (Pragma_Argument_Associations (Orig))));
-                  end if;
-               end;
-
-            --  Similar processing for Check pragma
-
-            elsif Nkind (Orig) = N_Pragma
-              and then Pragma_Name (Orig) = Name_Check
-            then
-               --  Don't want to warn if original condition is explicit False
-
-               declare
-                  Expr : constant Node_Id :=
-                    Original_Node
-                      (Expression
-                        (Next (First (Pragma_Argument_Associations (Orig)))));
-               begin
-                  if Is_Entity_Name (Expr)
-                    and then Entity (Expr) = Standard_False
-                  then
-                     null;
-
-                  --  Post warning
-
-                  else
-                     --  Again use Error_Msg_F rather than Error_Msg_N, see
-                     --  comment above for an explanation of why we do this.
-
-                     Error_Msg_F
-                       ("?.a?check would fail at run time!",
-                        Expression
-                          (Last (Pragma_Argument_Associations (Orig))));
-                  end if;
-               end;
-            end if;
-         end;
-      end if;
 
       --  Continue with processing of short circuit
 
@@ -13033,17 +12933,10 @@ package body Sem_Res is
       --  Likewise when an expression function is being preanalyzed, since the
       --  expression will be reanalyzed as part of the generated body.
 
-      if In_Spec_Expression then
-         declare
-            S : constant Entity_Id := Current_Scope_No_Loops;
-         begin
-            if Ekind (S) = E_Function
-              and then Nkind (Original_Node (Unit_Declaration_Node (S))) =
-                         N_Expression_Function
-            then
-               return;
-            end if;
-         end;
+      if In_Spec_Expression
+        and then Is_Expression_Function (Current_Scope_No_Loops)
+      then
+         return;
       end if;
 
       Op_Node := New_Node (Operator_Kind (Nam, Is_Binary), Sloc (N));

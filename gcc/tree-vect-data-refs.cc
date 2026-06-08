@@ -218,7 +218,7 @@ vect_get_smallest_scalar_type (stmt_vec_info stmt_info, tree scalar_type)
 	    i = ~0U;
 	  else if (internal_store_fn_p (ifn))
 	    {
-	      /* For stores use the tyep of the stored value.  */
+	      /* For stores use the type of the stored value.  */
 	      i = internal_fn_stored_value_index (ifn);
 	      scalar_type = TREE_TYPE (gimple_call_arg (call, i));
 	      i = ~0U;
@@ -300,7 +300,7 @@ vect_preserves_scalar_order_p (dr_vec_info *dr_info_a, dr_vec_info *dr_info_b)
     return true;
 
   /* If there is a loop invariant read involved we might vectorize it in
-     the prologue, breaking scalar oder with respect to the in-loop store.  */
+     the prologue, breaking scalar order with respect to the in-loop store.  */
   if ((DR_IS_READ (dr_info_a->dr) && integer_zerop (DR_STEP (dr_info_a->dr)))
       || (DR_IS_READ (dr_info_b->dr) && integer_zerop (DR_STEP (dr_info_b->dr))))
     return false;
@@ -889,6 +889,13 @@ vect_analyze_early_break_dependences (loop_vec_info loop_vinfo)
 			     dest_bb->index);
 
   LOOP_VINFO_EARLY_BRK_DEST_BB (loop_vinfo) = dest_bb;
+  /* Check if loop has a side-effect (stores), force scalar epilogue.  */
+  for (auto dr : LOOP_VINFO_DATAREFS (loop_vinfo))
+    if (DR_IS_WRITE (dr))
+      {
+	LOOP_VINFO_EARLY_BRK_NEEDS_EPILOG (loop_vinfo) = true;
+	break;
+      }
 
   if (!LOOP_VINFO_EARLY_BRK_VUSES (loop_vinfo).is_empty ())
     {
@@ -1261,7 +1268,7 @@ vect_slp_analyze_instance_dependence (vec_info *vinfo, slp_instance instance)
 
 	  /* For now concern ourselves with write-after-read as we also
 	     only look for re-use of the store within the same SLP instance.
-	     We can still get a RAW here when the instance contais a PHI
+	     We can still get a RAW here when the instance contains a PHI
 	     with a backedge though, thus this test.  */
 	  if (! vect_stmt_dominates_stmt_p (STMT_VINFO_STMT (load_info),
 					    STMT_VINFO_STMT (store_info)))
@@ -2074,33 +2081,21 @@ vect_peeling_hash_get_lowest_cost (_vect_peel_info **slot,
 				   _vect_peel_extended_info *min)
 {
   vect_peel_info elem = *slot;
-  int dummy;
   unsigned int inside_cost = 0, outside_cost = 0;
   loop_vec_info loop_vinfo = dyn_cast <loop_vec_info> (min->vinfo);
-  stmt_vector_for_cost prologue_cost_vec, body_cost_vec,
-		       epilogue_cost_vec;
+  stmt_vector_for_cost prologue_cost_vec, body_cost_vec;
 
   prologue_cost_vec.create (2);
   body_cost_vec.create (2);
-  epilogue_cost_vec.create (2);
 
   vect_get_peeling_costs_all_drs (loop_vinfo, elem->dr_info, &inside_cost,
 				  &outside_cost, &body_cost_vec,
 				  &prologue_cost_vec, elem->npeel);
 
   body_cost_vec.release ();
-
-  outside_cost += vect_get_known_peeling_cost
-    (loop_vinfo, elem->npeel, &dummy,
-     &LOOP_VINFO_SCALAR_ITERATION_COST (loop_vinfo),
-     &prologue_cost_vec, &epilogue_cost_vec);
-
-  /* Prologue and epilogue costs are added to the target model later.
-     These costs depend only on the scalar iteration cost, the
-     number of peeling iterations finally chosen, and the number of
-     misaligned statements.  So discard the information found here.  */
   prologue_cost_vec.release ();
-  epilogue_cost_vec.release ();
+
+  outside_cost += vect_get_known_peeling_cost (loop_vinfo, elem->npeel);
 
   if (inside_cost < min->inside_cost
       || (inside_cost == min->inside_cost
@@ -2626,7 +2621,7 @@ vect_enhance_data_refs_alignment (loop_vec_info loop_vinfo)
       || !slpeel_can_duplicate_loop_p (loop, LOOP_VINFO_MAIN_EXIT (loop_vinfo),
 				       loop_preheader_edge (loop))
       || loop->inner
-      /* We don't currently maintaing the LCSSA for prologue peeled inversed
+      /* We don't currently maintain the LCSSA for prologue peeled inversed
 	 loops.  */
       || (LOOP_VINFO_EARLY_BREAKS_VECT_PEELED (loop_vinfo)
 	  && !LOOP_VINFO_NITERS_UNCOUNTED_P (loop_vinfo)))
@@ -2691,18 +2686,8 @@ vect_enhance_data_refs_alignment (loop_vec_info loop_vinfo)
 	  peel_for_unknown_alignment.outside_cost = load_outside_cost;
 	}
 
-      stmt_vector_for_cost prologue_cost_vec, epilogue_cost_vec;
-      prologue_cost_vec.create (2);
-      epilogue_cost_vec.create (2);
-
-      int dummy2;
-      peel_for_unknown_alignment.outside_cost += vect_get_known_peeling_cost
-	(loop_vinfo, estimated_npeels, &dummy2,
-	 &LOOP_VINFO_SCALAR_ITERATION_COST (loop_vinfo),
-	 &prologue_cost_vec, &epilogue_cost_vec);
-
-      prologue_cost_vec.release ();
-      epilogue_cost_vec.release ();
+      peel_for_unknown_alignment.outside_cost
+	+= vect_get_known_peeling_cost (loop_vinfo, estimated_npeels);
 
       peel_for_unknown_alignment.peel_info.count = dr0_same_align_drs + 1;
     }
@@ -2760,18 +2745,7 @@ vect_enhance_data_refs_alignment (loop_vec_info loop_vinfo)
 
       /* Add epilogue costs.  As we do not peel for alignment here, no prologue
 	 costs will be recorded.  */
-      stmt_vector_for_cost prologue_cost_vec, epilogue_cost_vec;
-      prologue_cost_vec.create (2);
-      epilogue_cost_vec.create (2);
-
-      int dummy2;
-      nopeel_outside_cost += vect_get_known_peeling_cost
-	(loop_vinfo, 0, &dummy2,
-	 &LOOP_VINFO_SCALAR_ITERATION_COST (loop_vinfo),
-	 &prologue_cost_vec, &epilogue_cost_vec);
-
-      prologue_cost_vec.release ();
-      epilogue_cost_vec.release ();
+      nopeel_outside_cost += vect_get_known_peeling_cost (loop_vinfo, 0);
 
       npeel = best_peel.peel_info.npeel;
       dr0_info = best_peel.peel_info.dr_info;
@@ -4850,7 +4824,7 @@ vect_check_gather_scatter (stmt_vec_info stmt_info, tree vectype,
 
 	  /* In pattern recog we simply used a ZERO else value that
 	     we need to correct here.  To that end just re-use the
-	     (already succesful) check if we support a gather IFN
+	     (already successful) check if we support a gather IFN
 	     and have it populate the else values.  */
 	  if (DR_IS_READ (dr) && internal_fn_mask_index (ifn) >= 0 && elsvals)
 	    supports_vec_gather_load_p (TYPE_MODE (vectype), elsvals);
@@ -6213,7 +6187,7 @@ vect_grouped_store_supported (tree vectype, unsigned HOST_WIDE_INT count)
       if (dump_enabled_p ())
 	dump_printf_loc (MSG_MISSED_OPTIMIZATION, vect_location,
 			 "the size of the group of accesses"
-			 " is not a power of 2 or not eqaul to 3\n");
+			 " is not a power of 2 or not equal to 3\n");
       return false;
     }
 

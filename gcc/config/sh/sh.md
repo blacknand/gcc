@@ -823,7 +823,7 @@
 
 ;; Sometimes combine fails to form the (eq (and (op) (op)) 0) tst insn.
 ;; Try to fix that in the split1 pass by looking for the previous set
-;; of the tested op.  Also see if there is a preceeding sign/zero
+;; of the tested op.  Also see if there is a preceding sign/zero
 ;; extension that can be avoided.
 (define_split
   [(set (reg:SI T_REG)
@@ -854,7 +854,7 @@
       && !sh_insn_operands_modified_between_p (op.insn, op.insn, curr_insn))
     {
       if (dump_file)
-	fprintf (dump_file, "cmpeqsi_t: found preceeding and in insn %d\n",
+	fprintf (dump_file, "cmpeqsi_t: found preceding and in insn %d\n",
 		 INSN_UID (op.insn));
 
       if (!(arith_reg_operand (XEXP (op.set_src, 0), SImode)
@@ -1653,7 +1653,7 @@
    (set (match_dup 0) (plus:SI (match_dup 0) (const_int 1)))])
 
 
-;; The tree optimiziers canonicalize 
+;; The tree optimizers canonicalize 
 ;;    reg + (reg & 1)
 ;; into
 ;;    (reg + 1) & -2
@@ -4599,18 +4599,13 @@
 	(bswap:SI (match_operand:SI 1 "arith_reg_operand" "")))]
   "TARGET_SH1"
 {
-  if (! can_create_pseudo_p ())
-    FAIL;
-  else
-    {
-      rtx tmp0 = gen_reg_rtx (SImode);
-      rtx tmp1 = gen_reg_rtx (SImode);
+  rtx tmp0 = gen_reg_rtx (SImode);
+  rtx tmp1 = gen_reg_rtx (SImode);
 
-      emit_insn (gen_swapbsi2 (tmp0, operands[1]));
-      emit_insn (gen_rotlsi3_16 (tmp1, tmp0));
-      emit_insn (gen_swapbsi2 (operands[0], tmp1));
-      DONE;
-    }
+  emit_insn (gen_swapbsi2 (tmp0, operands[1]));
+  emit_insn (gen_rotlsi3_16 (tmp1, tmp0));
+  emit_insn (gen_swapbsi2 (operands[0], tmp1));
+  DONE;
 })
 
 (define_insn "swapbsi2"
@@ -5318,7 +5313,7 @@
 })
 
 ;; The address %0 is assumed to be 4-aligned at least.  Thus, by ORing
-;; 0xf0000008, we get the low-oder bits *1*00 (binary), which fits
+;; 0xf0000008, we get the low-order bits *1*00 (binary), which fits
 ;; the requirement *1*00 for associative address writes.  The alignment of
 ;; %0 implies that its least significant bit is cleared,
 ;; thus we clear the V bit of a matching entry if there is one.
@@ -5438,11 +5433,11 @@
 ;; placed into delay slots.  Since there is no QImode PC relative load, the
 ;; Q constraint and general_movsrc_operand will reject it for QImode.
 ;; The Sid/Ssd alternatives should come before Sdd in order to avoid
-;; a preference of using r0 als the register operand for addressing modes
+;; a preference of using r0 as the register operand for addressing modes
 ;; other than displacement addressing.
 ;; The Sdd alternatives allow only r0 as register operand, even though on
 ;; SH2A any register could be allowed by switching to a 32 bit insn.
-;; Generally sticking to the r0 is preferrable, since it generates smaller
+;; Generally sticking to the r0 is preferable, since it generates smaller
 ;; code.  Obvious r0 reloads can then be eliminated with a peephole on SH2A.
 (define_insn "*mov<mode>"
   [(set (match_operand:QIHI 0 "general_movdst_operand"
@@ -10892,7 +10887,7 @@
 ;; to be one.  It tries to convert a sequence such as
 ;;	movt	r2	->	movt	r2
 ;;	movt	r13		mov	r2,r13
-;; This gives the schduler a bit more freedom to hoist a following
+;; This gives the scheduler a bit more freedom to hoist a following
 ;; comparison insn.  Moreover, it the reg-reg mov insn is MT group which has
 ;; better chances for parallel execution.
 ;; We can do this with a peephole2 pattern, but then the cprop_hardreg

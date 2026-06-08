@@ -1121,7 +1121,7 @@ gfc_set_loop_bounds_from_array_spec (gfc_interface_mapping * mapping,
    free the array afterwards.
 
    If INITIAL is not NULL, it is packed using internal_pack and the result used
-   as data instead of allocating a fresh, unitialized area of memory.
+   as data instead of allocating a fresh, uninitialized area of memory.
 
    Initialization code is added to PRE and finalization code to POST.
    DYNAMIC is true if the caller may want to extend the array later
@@ -2434,7 +2434,7 @@ gfc_trans_array_constructor_value (stmtblock_t * pblock,
   /* F2008 4.5.6.3 para 5: If an executable construct references a structure
      constructor or array constructor, the entity created by the constructor is
      finalized after execution of the innermost executable construct containing
-     the reference. This, in fact, was later deleted by the Combined Techical
+     the reference. This, in fact, was later deleted by the Combined Technical
      Corrigenda 1 TO 4 for fortran 2008 (f08/0011).
 
      Transmit finalization of this constructor through 'finalblock'. */
@@ -3484,7 +3484,7 @@ maybe_substitute_expr (tree *tp, int *walk_subtree, void *data)
 }
 
 
-/* Substitute in EXPR any occurence of TARGET with REPLACEMENT.  */
+/* Substitute in EXPR any occurrence of TARGET with REPLACEMENT.  */
 
 static void
 substitute_subexpr_in_expr (tree target, tree replacement, tree expr)
@@ -3910,7 +3910,7 @@ abridged_ref_name (gfc_expr * expr, gfc_array_ref * ar)
 /* Generate code to perform an array index bound check.  */
 
 static tree
-trans_array_bound_check (gfc_se * se, gfc_ss *ss, tree index, int n,
+trans_array_bound_check (stmtblock_t *block, gfc_ss *ss, tree index, int n,
 			 locus * where, bool check_upper,
 			 const char *compname = NULL)
 {
@@ -3927,7 +3927,7 @@ trans_array_bound_check (gfc_se * se, gfc_ss *ss, tree index, int n,
 
   descriptor = ss->info->data.array.descriptor;
 
-  index = gfc_evaluate_now (index, &se->pre);
+  index = gfc_evaluate_now (index, block);
 
   /* We find a name for the error message.  */
   name = ss->info->expr->symtree->n.sym->name;
@@ -3961,13 +3961,13 @@ trans_array_bound_check (gfc_se * se, gfc_ss *ss, tree index, int n,
 
       fault = fold_build2_loc (input_location, LT_EXPR, logical_type_node,
 			       index, tmp_lo);
-      gfc_trans_runtime_check (true, false, fault, &se->pre, where, msg,
+      gfc_trans_runtime_check (true, false, fault, block, where, msg,
 			       fold_convert (long_integer_type_node, index),
 			       fold_convert (long_integer_type_node, tmp_lo),
 			       fold_convert (long_integer_type_node, tmp_up));
       fault = fold_build2_loc (input_location, GT_EXPR, logical_type_node,
 			       index, tmp_up);
-      gfc_trans_runtime_check (true, false, fault, &se->pre, where, msg,
+      gfc_trans_runtime_check (true, false, fault, block, where, msg,
 			       fold_convert (long_integer_type_node, index),
 			       fold_convert (long_integer_type_node, tmp_lo),
 			       fold_convert (long_integer_type_node, tmp_up));
@@ -3986,7 +3986,7 @@ trans_array_bound_check (gfc_se * se, gfc_ss *ss, tree index, int n,
 
       fault = fold_build2_loc (input_location, LT_EXPR, logical_type_node,
 			       index, tmp_lo);
-      gfc_trans_runtime_check (true, false, fault, &se->pre, where, msg,
+      gfc_trans_runtime_check (true, false, fault, block, where, msg,
 			       fold_convert (long_integer_type_node, index),
 			       fold_convert (long_integer_type_node, tmp_lo));
       free (msg);
@@ -4023,7 +4023,7 @@ gfc_expr_contains_impure_fcn (gfc_expr *e)
 /* Generate code for bounds checking for elemental dimensions.  */
 
 static void
-array_bound_check_elemental (gfc_se * se, gfc_ss * ss, gfc_expr * expr)
+array_bound_check_elemental (stmtblock_t *block, gfc_ss * ss, gfc_expr * expr)
 {
   gfc_array_ref *ar;
   gfc_ref *ref;
@@ -4052,8 +4052,8 @@ array_bound_check_elemental (gfc_se * se, gfc_ss * ss, gfc_expr * expr)
 		      gfc_init_se (&indexse, NULL);
 		      gfc_conv_expr_type (&indexse, ar->start[dim],
 					  gfc_array_index_type);
-		      gfc_add_block_to_block (&se->pre, &indexse.pre);
-		      trans_array_bound_check (se, ss, indexse.expr, dim,
+		      gfc_add_block_to_block (block, &indexse.pre);
+		      trans_array_bound_check (block, ss, indexse.expr, dim,
 					       &ar->where,
 					       ar->as->type != AS_ASSUMED_SIZE
 					       || dim < ar->dimen - 1,
@@ -4098,7 +4098,7 @@ conv_array_index_offset (gfc_se * se, gfc_ss * ss, int dim, int i,
 	  /* We've already translated this value outside the loop.  */
 	  index = info->subscript[dim]->info->data.scalar.value;
 
-	  index = trans_array_bound_check (se, ss, index, dim, &ar->where,
+	  index = trans_array_bound_check (&se->pre, ss, index, dim, &ar->where,
 					   ar->as->type != AS_ASSUMED_SIZE
 					   || dim < ar->dimen - 1);
 	  break;
@@ -4127,7 +4127,7 @@ conv_array_index_offset (gfc_se * se, gfc_ss * ss, int dim, int i,
 	  index = fold_convert (gfc_array_index_type, index);
 
 	  /* Do any bounds checking on the final info->descriptor index.  */
-	  index = trans_array_bound_check (se, ss, index, dim, &ar->where,
+	  index = trans_array_bound_check (&se->pre, ss, index, dim, &ar->where,
 					   ar->as->type != AS_ASSUMED_SIZE
 					   || dim < ar->dimen - 1);
 	  break;
@@ -8652,7 +8652,7 @@ gfc_conv_expr_descriptor (gfc_se *se, gfc_expr *expr)
 
   /* Add bounds-checking for elemental dimensions.  */
   if ((gfc_option.rtcheck & GFC_RTCHECK_BOUNDS) && !expr->no_bounds_check)
-    array_bound_check_elemental (se, ss, expr);
+    array_bound_check_elemental (&outermost_loop (&loop)->pre, ss, expr);
 
   if (need_tmp)
     {
@@ -9231,6 +9231,34 @@ is_pointer (gfc_expr *e)
   return sym->attr.pointer || sym->attr.proc_pointer;
 }
 
+/* Assumed-rank actual argument: the caller only allocates storage for dtype
+   rank dimensions. Copying GFC_MAX_DIMENSIONS dim entries would read past the
+   physical end of the descriptor. Copy the header fields explicitly and use a
+   runtime-sized memcpy for the dim[] entries.  */
+void
+gfc_resize_assumed_rank_dim_field (gfc_se *se, stmtblock_t *block, tree desc)
+{
+  tree rank, dim_field, dim_size, copy_size, dst_ptr, src_ptr;
+
+  gfc_conv_descriptor_data_set (block, desc,
+				gfc_conv_descriptor_data_get (se->expr));
+  gfc_conv_descriptor_offset_set (block, desc,
+				  gfc_conv_descriptor_offset_get (se->expr));
+  gfc_add_modify (block, gfc_conv_descriptor_dtype (desc),
+		  gfc_conv_descriptor_dtype (se->expr));
+  rank = fold_convert (size_type_node, gfc_conv_descriptor_rank (se->expr));
+  dim_field = gfc_get_descriptor_dimension (se->expr);
+  dim_size = TYPE_SIZE_UNIT (TREE_TYPE (TREE_TYPE (dim_field)));
+  copy_size = fold_build2_loc (input_location, MULT_EXPR,
+			       size_type_node, rank, dim_size);
+  dst_ptr = gfc_build_addr_expr (pvoid_type_node,
+				 gfc_get_descriptor_dimension (desc));
+  src_ptr = gfc_build_addr_expr (pvoid_type_node, dim_field);
+  gfc_add_expr_to_block (block, build_call_expr_loc (input_location,
+			 builtin_decl_explicit (BUILT_IN_MEMCPY),
+			 3, dst_ptr, src_ptr, copy_size));
+}
+
 /* Convert an array for passing as an actual parameter.  */
 
 void
@@ -9505,7 +9533,12 @@ gfc_conv_array_parameter (gfc_se *se, gfc_expr *expr, bool g77,
 	      gfc_conv_descriptor_offset_set (&block, arr, gfc_index_zero_node);
 	      se->expr = arr;
 	    }
-	  gfc_class_array_data_assign (&block, tmp, se->expr, true);
+	  if (expr->rank == -1)
+	    gfc_resize_assumed_rank_dim_field (se, &block, tmp);
+	  else if (CLASS_DATA (fsym)->as->rank == -1)
+	    gfc_class_array_data_assign (&block, tmp, se->expr, false);
+	  else
+	    gfc_class_array_data_assign (&block, tmp, se->expr, true);
 
 	  /* Handle optional.  */
 	  if (fsym && fsym->attr.optional && sym && sym->attr.optional)
@@ -10058,7 +10091,7 @@ duplicate_allocatable_coarray (tree dest, tree dest_tok, tree src, tree type,
     }
   else
     {
-      /* Set the rank or unitialized memory access may be reported.  */
+      /* Set the rank or uninitialized memory access may be reported.  */
       tmp = gfc_conv_descriptor_rank (dest);
       gfc_add_modify (&globalblock, tmp, build_int_cst (TREE_TYPE (tmp), rank));
 

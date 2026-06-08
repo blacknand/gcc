@@ -424,25 +424,19 @@ parser_lsearch_start(   cbl_label_t *name,
 
 void parser_lsearch_conditional(cbl_label_t * name);
 void parser_bsearch_conditional(cbl_label_t * name);
-
 void parser_lsearch_when( cbl_label_t *name, cbl_field_t *conditional );
-void
-parser_bsearch_when(cbl_label_t *name,
-                    cbl_refer_t key,
-                    cbl_refer_t sarg,
-                    bool ascending);
-
+void parser_bsearch_when( cbl_label_t *name,
+                          const cbl_refer_t &key,
+                          const cbl_refer_t &sarg,
+                                bool ascending);
 void parser_lsearch_end( cbl_label_t *name );
 void parser_bsearch_end( cbl_label_t *name );
+void parser_bsearch_start( cbl_label_t *name, cbl_field_t *tgt );
 
-void
-parser_bsearch_start( cbl_label_t *name, cbl_field_t *tgt );
-
-void
-parser_sort(cbl_refer_t table,
-            bool duplicates,
-            cbl_alphabet_t *alphabet,
-            const std::vector<cbl_key_t>& keys );
+void parser_sort( cbl_refer_t table,
+                  bool duplicates,
+                  cbl_alphabet_t *alphabet,
+                  const std::vector<cbl_key_t>& keys );
 void
 parser_file_sort(   cbl_file_t *file,
                     bool duplicates,
@@ -623,5 +617,8 @@ void parser_statement_end( const std::list<cbl_field_t*>& );
 
 tree parser_compile_ecs( const std::vector<uint64_t>& ecs );
 tree parser_compile_dcls( const std::vector<uint64_t>& dcls );
+
+void parser_trim( cbl_field_t *tgt, const cbl_refer_t& input,
+                  size_t how, const std::vector<cbl_refer_t>& args );
 
 #endif

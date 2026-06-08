@@ -111,7 +111,8 @@ enum rid
   RID_TYPES_COMPATIBLE_P,      RID_BUILTIN_COMPLEX,	   RID_BUILTIN_SHUFFLE,
   RID_BUILTIN_SHUFFLEVECTOR,   RID_BUILTIN_CONVERTVECTOR,  RID_BUILTIN_TGMATH,
   RID_BUILTIN_HAS_ATTRIBUTE,   RID_BUILTIN_ASSOC_BARRIER,  RID_BUILTIN_STDC,
-  RID_BUILTIN_COUNTED_BY_REF,
+  RID_BUILTIN_COUNTED_BY_REF,  RID_BUILTIN_BSWAPG,
+  RID_BUILTIN_BITREVERSEG,
   RID_DFLOAT32, RID_DFLOAT64, RID_DFLOAT128, RID_DFLOAT64X,
 
   /* TS 18661-3 keywords, in the same sequence as the TI_* values.  */
@@ -1312,9 +1313,11 @@ enum c_omp_region_type
   C_ORT_EXIT_DATA		= 1 << 4,
   C_ORT_INTEROP			= 1 << 5,
   C_ORT_DECLARE_MAPPER		= 1 << 6,
+  C_ORT_UPDATE			= 1 << 7,
   C_ORT_OMP_DECLARE_SIMD	= C_ORT_OMP | C_ORT_DECLARE_SIMD,
   C_ORT_OMP_TARGET		= C_ORT_OMP | C_ORT_TARGET,
   C_ORT_OMP_EXIT_DATA		= C_ORT_OMP | C_ORT_EXIT_DATA,
+  C_ORT_OMP_UPDATE		= C_ORT_OMP | C_ORT_UPDATE,
   C_ORT_OMP_INTEROP		= C_ORT_OMP | C_ORT_INTEROP,
   C_ORT_OMP_DECLARE_MAPPER	= C_ORT_OMP | C_ORT_DECLARE_MAPPER,
   C_ORT_ACC_TARGET		= C_ORT_ACC | C_ORT_TARGET
@@ -1357,7 +1360,7 @@ extern void c_omp_mark_declare_variant (location_t, tree, tree);
 extern void c_omp_adjust_map_clauses (tree, bool);
 template<typename T> struct omp_mapper_list;
 extern void c_omp_find_nested_mappers (struct omp_mapper_list<tree> *, tree);
-extern tree c_omp_instantiate_mappers (tree);
+extern tree c_omp_instantiate_mappers (tree, enum c_omp_region_type);
 
 namespace omp_addr_tokenizer { struct omp_addr_token; }
 typedef omp_addr_tokenizer::omp_addr_token omp_addr_token;
@@ -1591,7 +1594,7 @@ extern tree build_userdef_literal (tree suffix_id, tree value,
 
 extern bool convert_vector_to_array_for_subscript (location_t, tree *, tree);
 
-/* Possibe cases of scalar_to_vector conversion.  */
+/* Possible cases of scalar_to_vector conversion.  */
 enum stv_conv {
   stv_error,        /* Error occurred.  */
   stv_nothing,      /* Nothing happened.  */

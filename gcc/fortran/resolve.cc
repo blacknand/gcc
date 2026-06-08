@@ -2826,7 +2826,7 @@ resolve_global_procedure (gfc_symbol *sym, locus *where, int sub)
 				   reason, sizeof(reason), NULL, NULL,
 				   &bad_result_characteristics))
 	{
-	  /* Turn erros into warnings with -std=gnu and -std=legacy,
+	  /* Turn errors into warnings with -std=gnu and -std=legacy,
 	     unless a function returns a wrong type, which can lead
 	     to all kinds of ICEs and wrong code.  */
 
@@ -6578,6 +6578,13 @@ resolve_variable (gfc_expr *e)
       if (e->expr_type == EXPR_CONSTANT)
 	return true;
     }
+  else if (IS_INFERRED_TYPE (e)
+	   && sym->ts.type != BT_UNKNOWN
+	   && (sym->ts.type != e->ts.type || sym->ts.kind != e->ts.kind))
+    /* No subobject ref, but the expression's typespec was set at parse
+       time before the target's actual type/kind was known.  Refresh from
+       the now-resolved associate-name symbol.  */
+    e->ts = sym->ts;
   else if (sym->attr.select_type_temporary
 	   && sym->ns->assoc_name_inferred)
     gfc_fixup_inferred_type_refs (e);
@@ -6962,6 +6969,15 @@ gfc_fixup_inferred_type_refs (gfc_expr *e)
 					   sym->assoc->target->ts.kind);
 	  gfc_replace_expr (e, ne);
 	}
+      else if (ref && ref->type == REF_INQUIRY
+	       && (ref->u.i == INQUIRY_RE || ref->u.i == INQUIRY_IM)
+	       && sym->ts.type == BT_COMPLEX
+	       && e->ts.type == BT_REAL
+	       && e->ts.kind != sym->ts.kind)
+	/* primary.cc set the inquiry-result kind to the default real kind
+	   when the associate-name's type was inferred from %re/%im before
+	   the target was resolved.  Now use the (resolved) selector kind.  */
+	e->ts.kind = sym->ts.kind;
 
       /* Now that the references are all sorted out, set the expression rank
 	 and return.  */
@@ -7008,7 +7024,7 @@ gfc_fixup_inferred_type_refs (gfc_expr *e)
 	break;
       }
 
-  /* Verify that the type inferrence mechanism has not introduced a spurious
+  /* Verify that the type inference mechanism has not introduced a spurious
      array reference.  This can happen with an associate name, whose selector
      is an element of another inferred type.  */
   target = e->symtree->n.sym->assoc->target;
@@ -8581,15 +8597,23 @@ check_default_none_expr (gfc_expr **e, int *, void *data)
 	      ns2 = ns2->parent;
 	    }
 
-	  /* A DO CONCURRENT iterator cannot appear in a locality spec.  */
-	  if (sym->ns->code->ext.concur.forall_iterator)
+	  /* A DO CONCURRENT iterator cannot appear in a locality spec.
+	     Use d->code (the DO CONCURRENT node) rather than sym->ns->code,
+	     which may be a different code type (e.g. EXEC_ASSOCIATE) whose
+	     ext union would be read incorrectly.  */
+	  for (gfc_forall_iterator *iter = d->code->ext.concur.forall_iterator;
+	       iter; iter = iter->next)
 	    {
-	      gfc_forall_iterator *iter
-		= sym->ns->code->ext.concur.forall_iterator;
-	      for (; iter; iter = iter->next)
-		if (iter->var->symtree
-		    && strcmp(sym->name, iter->var->symtree->name) == 0)
-		  return 0;
+	      if (!iter->var || !iter->var->symtree)
+		continue;
+	      const char *iter_name = iter->var->symtree->name;
+	      /* Shadow iterators (from inline type-spec: integer :: i = ...)
+		 store the iterator with a leading underscore internally; the
+		 user-visible name does not have the underscore.  */
+	      if (iter->shadow)
+		iter_name++;
+	      if (strcmp (sym->name, iter_name) == 0)
+		return 0;
 	    }
 
 	  /* A named constant is not a variable, so skip test.  */
@@ -10680,6 +10704,16 @@ resolve_assoc_var (gfc_symbol* sym, bool resolve_target)
 	/* Confirmed to be either a derived type or misidentified to be a
 	   scalar class object, when the selector is a class array.  */
 	sym->ts = target->ts;
+      else if (sym->assoc->inferred_type
+	       && (sym->ts.type == BT_COMPLEX
+		   || sym->ts.type == BT_CHARACTER)
+	       && target->ts.type == sym->ts.type
+	       && sym->ts.kind != target->ts.kind)
+	/* The inferred type was set from a %re, %im or %len inquiry on
+	   the associate name with the default kind, before the target's
+	   actual type was known.  Now that the target has been resolved,
+	   update the kind to match.  */
+	sym->ts = target->ts;
     }
 
 
@@ -12588,7 +12622,8 @@ gfc_count_forall_iterators (gfc_code *code)
    3) call gfc_resolve_forall_body to resolve the FORALL body.  */
 
 /* Custom recursive expression walker that replaces symbols.
-   This ensures we visit ALL expressions including those in array subscripts.  */
+   Visits all expressions including array subscripts.  Also called from
+   replace_in_code_recursive to handle ASSOCIATE selector expressions.  */
 
 static void
 replace_in_expr_recursive (gfc_expr *expr, gfc_symbol *old_sym, gfc_symtree *new_st)
@@ -12713,6 +12748,19 @@ replace_in_code_recursive (gfc_code *code, gfc_symbol *old_sym, gfc_symtree *new
 	    }
 	  /* Don't recurse into nested FORALL/DO CONCURRENT bodies here,
 	     they'll be handled separately */
+	  break;
+
+	case EXEC_BLOCK:
+	  /* Replace in ASSOCIATE selector expressions and the body.
+	     The body of an EXEC_BLOCK lives in c->ext.block.ns->code, not
+	     c->block->next, so without this case both selectors and body
+	     are silently skipped, leaving shadow iterator references unreplaced
+	     and producing wrong values at runtime.  */
+	  for (gfc_association_list *alist = c->ext.block.assoc;
+	       alist; alist = alist->next)
+	    replace_in_expr_recursive (alist->target, old_sym, new_st);
+	  if (c->ext.block.ns)
+	    replace_in_code_recursive (c->ext.block.ns->code, old_sym, new_st);
 	  break;
 
 	default:
@@ -14877,6 +14925,134 @@ gfc_verify_DTIO_procedures (gfc_symbol *sym)
   return;
 }
 
+/* Auxiliary function, checks if an argument decays to a pointer.  */
+
+static bool
+decays_to_pointer (gfc_symbol *sym)
+{
+  if (!sym->as)
+    return true;
+
+  if (sym->as->type == AS_ASSUMED_SHAPE)
+    return false;
+
+  if (sym->as->type == AS_ASSUMED_RANK)
+    return false;
+
+  if (sym->as->type == AS_DEFERRED && sym->attr.dummy)
+    return false;
+
+  return true;
+}
+
+/* Helper function, returns true if the types conform according to the C
+   standard, when they are not equal on the Fortran side.  If we decide to
+   include or exclude any types from this, this is the place to change.  */
+
+static bool
+c_types_conform (gfc_typespec *ts1, gfc_typespec *ts2)
+{
+  if (ts1->type == BT_ASSUMED || ts2->type == BT_ASSUMED)
+    return true;
+
+  if (ts1->kind == ts2->kind
+      && (ts1->type == BT_CHARACTER || ts1->type == BT_INTEGER
+	  || ts1->type == BT_UNSIGNED)
+      && (ts2->type == BT_CHARACTER || ts2->type == BT_INTEGER
+	  || ts2->type == BT_UNSIGNED))
+    return true;
+
+  return false;
+
+}
+
+/* Check argument lists of BIND(C) procedures against each other, return
+   false if they do not. */
+
+static bool
+compare_c_binding_arglists (gfc_symbol *osym, gfc_symbol *nsym)
+{
+  gfc_formal_arglist *oarg, *narg;
+  bool ret = true;
+  locus *oloc, *nloc;
+
+  oarg = osym->formal;
+  narg = nsym->formal;
+  oloc = &osym->declared_at;
+  nloc = &nsym->declared_at;
+  for ( ; oarg && narg ; oarg = oarg->next, narg = narg->next)
+    {
+      oloc = &oarg->sym->declared_at;
+      nloc = &narg->sym->declared_at;
+
+      if (!gfc_compare_types (&oarg->sym->ts, &narg->sym->ts)
+	  && (pedantic || !c_types_conform (&oarg->sym->ts, &narg->sym->ts)))
+	{
+	  gfc_error ("Type mismatch in argument %qs at %L (%s/%s) "
+		     "originally declared at %L", narg->sym->name,
+		     nloc, gfc_typename (&narg->sym->ts),
+		     gfc_typename (&oarg->sym->ts), oloc);
+		     ret = false;
+		     continue;
+	}
+      if (oarg->sym->attr.value != narg->sym->attr.value)
+	{
+	  gfc_error ("VALUE attribute mismatch in argument %qs at %L "
+		     "originally declared at %L",narg->sym->name,
+		     nloc, oloc);
+	  ret = false;
+	  continue;
+	}
+
+      /* According to the Fortran standard, ranks have to match for arguments.
+	 In this case, this makes little sense because both decay to C
+	 pointers.  Only issue an error if -pedantic or if the argument does
+	 not decay to a pointer.  Same thing for CFI_desc arrays, which include
+	 assumed rank.  */
+
+      int orank = gfc_symbol_rank (oarg->sym);
+      int nrank = gfc_symbol_rank (narg->sym);
+      if (orank != nrank && pedantic)
+	{
+	  gfc_error ("Rank mismatch in argument %qs (%d/%d) at %L originally "
+		     "declared at %L", narg->sym->name, nrank, orank,  nloc,
+		     oloc);
+	  ret = false;
+	  continue;
+	}
+
+      /* Confusion between CFI_desc and "normal" arrays.  */
+
+      if (decays_to_pointer (oarg->sym) != decays_to_pointer (narg->sym))
+	{
+	  gfc_error ("Array specification mismatch in argument %qs at %L "
+		     "originally declared at %L", narg->sym->name,
+		     nloc, oloc);
+	  ret = false;
+	  continue;
+	}
+    }
+
+  if (oarg && !narg)
+    {
+      gfc_error ("Not enough arguments for procedure %qs with binding label "
+		 "%qs after %L, originally declared at %L", nsym->name,
+		 nsym->binding_label, nloc, &oarg->sym->declared_at);
+      ret = false;
+    }
+
+  if (!oarg && narg)
+    {
+      gfc_error ("Too many arguments for procedure %qs with binding label "
+		 "%qs at %L, originally declared at %L", nsym->name,
+		 nsym->binding_label, &narg->sym->declared_at, oloc);
+      ret = false;
+    }
+
+  return ret;
+}
+
+
 /* Verify that any binding labels used in a given namespace do not collide
    with the names or binding labels of any global symbols.  Multiple INTERFACE
    for the same procedure are permitted.  Abstract interfaces and dummy
@@ -14893,7 +15069,24 @@ gfc_verify_binding_labels (gfc_symbol *sym)
       || sym->attr.abstract || sym->attr.dummy)
     return;
 
-  gsym = gfc_find_case_gsymbol (gfc_gsym_root, sym->binding_label);
+  /* Avoid double error reporting.  */
+  if (sym->error)
+    return;
+
+  /* TODO: Check the names of reserved external C identifiers here, see
+     PR 125251.  */
+
+  /* According to the Fortran standard, global identifiers are case
+     insensitive, which also holds for C identifiers.  This was probably done
+     for systems which had case-insensitive linkers.  Such systems could not
+     accommodate the C standards referenced, so this restriction makes little
+     sense for modern systems. Therefore, check case-sensitive labels unless
+     -pedantic is in force.  */
+
+  if (pedantic)
+    gsym = gfc_find_case_gsymbol (gfc_gsym_root, sym->binding_label);
+  else
+    gsym = gfc_find_gsymbol (gfc_gsym_root, sym->binding_label);
 
   if (sym->module)
     module = sym->module;
@@ -14906,6 +15099,55 @@ gfc_verify_binding_labels (gfc_symbol *sym)
     module = sym->ns->parent->proc_name->name;
   else
     module = NULL;
+
+  if (gsym)
+    {
+      if (gsym->type == GSYM_FUNCTION || gsym->type == GSYM_SUBROUTINE)
+	{
+	  gfc_symbol *global_sym;
+	  gfc_find_symbol (gsym->sym_name, gsym->ns, 0, &global_sym);
+
+	  /* For when the symtree does not match the symbol name, which can happen
+	     in modules with PRIVATE.  */
+
+	  if (global_sym == NULL)
+	    gfc_find_symbol_by_name (gsym->sym_name, gsym->ns, &global_sym);
+
+	  gcc_assert (global_sym);
+
+	  /* If subroutines and functions are conflated, there is little point
+	     in continuing checks.  */
+	  if ((sym->attr.function && gsym->type == GSYM_SUBROUTINE)
+	      || (sym->attr.subroutine && gsym->type == GSYM_FUNCTION))
+	    {
+	      gfc_global_used (gsym, &sym->declared_at);
+	      sym->binding_label = NULL;
+	      sym->error = 1;
+	      return;
+	    }
+
+	  if (gsym->type == GSYM_FUNCTION && sym->attr.function
+	      && !gfc_compare_types (&sym->ts, &global_sym->ts))
+	    {
+	      gfc_error ("Return type mismatch of function %qs with binding "
+			 "label %qs at %L (%s/%s), originally declared at %L",
+			 sym->name, sym->binding_label,
+			 &sym->declared_at,
+			 gfc_typename (&sym->ts),
+			 gfc_typename (&global_sym->ts),
+			 &gsym->where);
+	      sym->binding_label = NULL;
+	      sym->error = 1;
+	      return;
+	    }
+	  if (!compare_c_binding_arglists (global_sym, sym))
+	    {
+	      sym->binding_label = NULL;
+	      sym->error = 1;
+	      return;
+	    }
+	}
+    }
 
   if (!gsym
       || (!gsym->defined
@@ -14966,6 +15208,7 @@ gfc_verify_binding_labels (gfc_symbol *sym)
 		 "global identifier as entity at %L", sym->name,
 		 sym->binding_label, &sym->declared_at, &gsym->where);
       sym->binding_label = NULL;
+      return;
     }
 }
 
@@ -16997,12 +17240,16 @@ resolve_typebound_procedures (gfc_symbol* derived)
   int op;
   gfc_symbol* super_type;
 
-  if (!derived->f2k_derived || !derived->f2k_derived->tb_sym_root)
-    return true;
-
+  /* Resolve the super-type first so that inherited bindings (including
+     user operators) are fully resolved before we look them up via
+     gfc_find_typebound_user_op.  This must happen even when 'derived'
+     has no direct type-bound bindings of its own.  */
   super_type = gfc_get_derived_super_type (derived);
   if (super_type)
     resolve_symbol (super_type);
+
+  if (!derived->f2k_derived || !derived->f2k_derived->tb_sym_root)
+    return true;
 
   resolve_bindings_derived = derived;
   resolve_bindings_result = true;
@@ -18098,7 +18345,7 @@ resolve_fl_parameter (gfc_symbol *sym)
       && !gfc_is_constant_expr (sym->value))
     {
       /* PR fortran/117070 argues a nonconstant proc pointer can appear in
-	 the array constructor of a paramater.  This seems inconsistant with
+	 the array constructor of a parameter.  This seems inconsistent with
 	 the concept of a parameter. TODO: Needs an interpretation.  */
       if (sym->value->ts.type == BT_DERIVED
 	  && sym->value->ts.u.derived
@@ -20382,6 +20629,11 @@ resolve_types (gfc_namespace *ns)
   gfc_resolve_omp_declare (ns);
 
   gfc_resolve_omp_udrs (ns->omp_udr_root);
+
+  gfc_resolve_omp_udms (ns->omp_udm_root);
+  if (ns->omp_udm_root)
+    gfc_error ("Sorry, %<declare mapper%>, used at %L, is not yet implemented",
+	       &ns->omp_udm_root->n.omp_udm->where);
 
   ns->types_resolved = 1;
 

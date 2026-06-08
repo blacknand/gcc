@@ -255,7 +255,8 @@ package body Exp_Ch4 is
    --  case expressions. Inspect and process actions list Stmts of expression
    --  Expr for transient objects. If such objects are found, the routine will
    --  generate code to finalize them when the enclosing context is elaborated
-   --  or evaluated.
+   --  or evaluated. Moreover, if the declaration of a _Chain entity is found,
+   --  the routine will append a call to Activate_Tasks on the entity to Stmts.
 
    --  This specific processing is required for these expressions because the
    --  management of transient objects for expressions implemented in Exp_Ch7
@@ -839,7 +840,7 @@ package body Exp_Ch4 is
 
       if Is_Entity_Name (Exp)
         and then Has_Anonymous_Access_Discriminant (Etype (Exp))
-        and then Static_Accessibility_Level (Exp, Object_Decl_Level)
+        and then Static_Accessibility_Level (Exp, Zero_On_Dynamic_Level)
                    > Static_Accessibility_Level (N, Object_Decl_Level)
       then
          --  A dynamic check and a warning are generated when we are within
@@ -4561,13 +4562,14 @@ package body Exp_Ch4 is
          Error_Msg_N ("?_a?use of an anonymous access type allocator", N);
       end if;
 
-      --  Here we set no initialization on types with constructors since we
-      --  generate initialization for the separately.
+      --  Suppress default initialization on internally generated allocators
+      --  since they are initialized separately.
 
-      if Needs_Construction (Directly_Designated_Type (PtrT))
+      if not Comes_From_Source (Parent (N))
+        and then Needs_Construction (Directly_Designated_Type (PtrT))
         and then Nkind (Expression (N)) = N_Identifier
       then
-         Set_No_Initialization (N, False);
+         Set_No_Initialization (N);
       end if;
 
       --  RM E.2.2(17). We enforce that the expected type of an allocator
@@ -4975,7 +4977,7 @@ package body Exp_Ch4 is
             --  created when expanding the function declaration.
 
             if Has_Task (Etyp) then
-               if No (Master_Id (Base_Type (PtrT))) then
+               if No (Master_Id (PtrT)) then
                   --  The designated type was an incomplete type, and the
                   --  access type did not get expanded. Salvage it now.
 
@@ -5089,7 +5091,7 @@ package body Exp_Ch4 is
                --  create a specific block to activate the created tasks.
 
                if Has_Task (Etyp) then
-                  Insert_Actions (N,
+                  Insert_Action (N,
                     Build_Task_Allocate_Block (N, Init_Stmts),
                     Suppress => All_Checks);
                else
@@ -5162,9 +5164,6 @@ package body Exp_Ch4 is
       --  Return True if we can copy objects of this type when expanding a case
       --  expression.
 
-      function Is_Optimizable_Declaration (N : Node_Id) return Boolean;
-      --  Return True if N is an object declaration that can be optimized
-
       ------------------
       -- Is_Copy_Type --
       ------------------
@@ -5173,20 +5172,6 @@ package body Exp_Ch4 is
       begin
          return Is_Elementary_Type (Underlying_Type (Typ));
       end Is_Copy_Type;
-
-      --------------------------------
-      -- Is_Optimizable_Declaration --
-      --------------------------------
-
-      function Is_Optimizable_Declaration (N : Node_Id) return Boolean is
-      begin
-         return Nkind (N) = N_Object_Declaration
-           and then not (Is_Entity_Name (Object_Definition (N))
-                          and then Is_Class_Wide_Type
-                                     (Entity (Object_Definition (N))))
-           and then not Is_Return_Object (Defining_Identifier (N))
-           and then not Is_Copy_Type (Typ);
-      end Is_Optimizable_Declaration;
 
       --  Local variables
 
@@ -5236,10 +5221,10 @@ package body Exp_Ch4 is
       --    case X is
       --       when A =>
       --          then-obj : typ := then_expr;
-      --          target :=  then-obj'Unrestricted_Access;
+      --          target := then-obj'Unrestricted_Access;
       --       when B =>
       --          else-obj : typ := else-expr;
-      --          target :=  else-obj'Unrestricted_Access;
+      --          target := else-obj'Unrestricted_Access;
       --       ...
       --    end case
       --
@@ -5265,7 +5250,8 @@ package body Exp_Ch4 is
                            Unqualified_Unconditional_Parent (N);
          begin
             if Nkind (Uncond_Par) = N_Simple_Return_Statement
-              or else Is_Optimizable_Declaration (Uncond_Par)
+              or else (Is_Distributable_Declaration (Uncond_Par)
+                        and then not Is_Copy_Type (Typ))
               or else (Parent_Is_Regular_Aggregate (Uncond_Par)
                         and then not Is_Copy_Type (Typ))
             then
@@ -5286,7 +5272,7 @@ package body Exp_Ch4 is
          elsif Nkind (Par) = N_Simple_Return_Statement then
             Optimize_Return_Stmt := True;
 
-         elsif Is_Optimizable_Declaration (Par) then
+         elsif Is_Distributable_Declaration (Par) then
             Optimize_Object_Decl := True;
 
          else
@@ -5305,7 +5291,7 @@ package body Exp_Ch4 is
 
       --  If the case expression is a predicate specification, do not expand
       --  because it will need to be recognized and converted to the canonical
-      --  predicate form later if it it happens to be static.
+      --  predicate form later if it happens to be static.
 
       if Ekind (Scop) in E_Function | E_Procedure
         and then Is_Predicate_Function (Scop)
@@ -5313,6 +5299,8 @@ package body Exp_Ch4 is
         and then Entity (Expression (N)) = First_Entity (Scop)
         and then (Is_Scalar_Type (Etype (Expression (N)))
                    or else Is_String_Type (Etype (Expression (N))))
+        and then Is_Predicate_Static
+            (Expr => N, Nam => Chars (First_Entity (Scop)), Warn => False)
         and then not Has_Dynamic_Predicate_Aspect (Etype (Expression (N)))
       then
          return;
@@ -5479,8 +5467,10 @@ package body Exp_Ch4 is
             --    Target := Obj'Unrestricted_Access;
 
             elsif Optimize_Object_Decl then
+               Par_Obj := Defining_Identifier (Par);
                Obj := Make_Temporary (Loc, 'C', Alt_Expr);
 
+               Set_Is_Return_Object (Obj, Is_Return_Object (Par_Obj));
                Insert_Conditional_Object_Declaration
                  (Obj, Typ, Alt_Expr, Const => Constant_Present (Par));
 
@@ -5751,19 +5741,20 @@ package body Exp_Ch4 is
       Par   : constant Node_Id    := Parent (N);
       Typ   : constant Entity_Id  := Etype (N);
 
-      Force_Expand : constant Boolean := Is_Anonymous_Access_Actual (N);
+      Force_Expand : constant Boolean
+        := Needs_Accessibility_Level_Temp_Or_Check (N);
       --  Determine if we are dealing with a special case of a conditional
       --  expression used as an actual for an anonymous access type which
       --  forces us to transform the if expression into an expression with
       --  actions in order to create a temporary to capture the level of the
-      --  expression in each branch.
+      --  expression in each branch. Also True if the conditional
+      --  expression is the RHS of an assignment to a saooaaat (so the
+      --  accessibility level temp associated with the saooaaat also needs
+      --  to be updated as part of the assignment).
 
       function Is_Copy_Type (Typ : Entity_Id) return Boolean;
       --  Return True if we can copy objects of this type when expanding an if
       --  expression.
-
-      function Is_Optimizable_Declaration (N : Node_Id) return Boolean;
-      --  Return True if N is an object declaration that can be optimized
 
       function OK_For_Single_Subtype (T1, T2 : Entity_Id) return Boolean;
       --  Return true if it is acceptable to use a single subtype for two
@@ -5781,20 +5772,6 @@ package body Exp_Ch4 is
          return Is_Definite_Subtype (Utyp)
            and then not Is_By_Reference_Type (Utyp);
       end Is_Copy_Type;
-
-      --------------------------------
-      -- Is_Optimizable_Declaration --
-      --------------------------------
-
-      function Is_Optimizable_Declaration (N : Node_Id) return Boolean is
-      begin
-         return Nkind (N) = N_Object_Declaration
-           and then not (Is_Entity_Name (Object_Definition (N))
-                          and then Is_Class_Wide_Type
-                                     (Entity (Object_Definition (N))))
-           and then not Is_Return_Object (Defining_Identifier (N))
-           and then not Is_Copy_Type (Typ);
-      end Is_Optimizable_Declaration;
 
       ---------------------------
       -- OK_For_Single_Subtype --
@@ -5856,10 +5833,10 @@ package body Exp_Ch4 is
 
       --    if cond then
       --       then-obj : typ := then_expr;
-      --       target :=  then-obj'Unrestricted_Access;
+      --       target := then-obj'Unrestricted_Access;
       --    else
       --       else-obj : typ := else-expr;
-      --       target :=  else-obj'Unrestricted_Access;
+      --       target := else-obj'Unrestricted_Access;
       --    end if;
       --
       --    obj : typ renames target.all;
@@ -5885,7 +5862,8 @@ package body Exp_Ch4 is
                            Unqualified_Unconditional_Parent (N);
          begin
             if Nkind (Uncond_Par) = N_Simple_Return_Statement
-              or else Is_Optimizable_Declaration (Uncond_Par)
+              or else (Is_Distributable_Declaration (Uncond_Par)
+                        and then not Is_Copy_Type (Typ))
               or else (Parent_Is_Regular_Aggregate (Uncond_Par)
                         and then not Is_Copy_Type (Typ))
             then
@@ -5906,7 +5884,7 @@ package body Exp_Ch4 is
          elsif Nkind (Par) = N_Simple_Return_Statement then
             Optimize_Return_Stmt := True;
 
-         elsif Is_Optimizable_Declaration (Par) then
+         elsif Is_Distributable_Declaration (Par) then
             Optimize_Object_Decl := True;
 
          else
@@ -6074,8 +6052,11 @@ package body Exp_Ch4 is
             Target   : constant Entity_Id := Make_Temporary (Loc, 'C', N);
 
          begin
+            Set_Is_Return_Object (Then_Obj, Is_Return_Object (Par_Obj));
             Insert_Conditional_Object_Declaration
               (Then_Obj, Typ, Thenx, Const => Constant_Present (Par));
+
+            Set_Is_Return_Object (Else_Obj, Is_Return_Object (Par_Obj));
             Insert_Conditional_Object_Declaration
               (Else_Obj, Typ, Elsex, Const => Constant_Present (Par));
 
@@ -7238,14 +7219,13 @@ package body Exp_Ch4 is
                   --  since we cannot rely on dynamic levels.
 
                   if No_Dynamic_Accessibility_Checks_Enabled (Lop) then
-                     if Static_Accessibility_Level
-                          (Lop, Object_Decl_Level)
-                            > Type_Access_Level (Rtyp)
-                     then
-                        Rewrite (N, New_Occurrence_Of (Standard_False, Loc));
-                     else
-                        Rewrite (N, New_Occurrence_Of (Standard_True, Loc));
-                     end if;
+                     Rewrite (N,
+                       New_Occurrence_Of
+                         (Boolean_Literals
+                            (Static_Accessibility_Level
+                               (Lop, Object_Decl_Level) <=
+                                        Type_Access_Level (Rtyp)),
+                          Loc));
                      Analyze_And_Resolve (N, Restyp);
 
                   --  If a conversion of the anonymous access value to the
@@ -8610,6 +8590,8 @@ package body Exp_Ch4 is
 
          if Validity_Check_Operands
            and then not Is_Known_Valid (Component_Type (Typl))
+           and then not
+             Is_Check_Suppressed (Component_Type (Typl), Validity_Check)
          then
             declare
                Save_Force_Validity_Checks : constant Boolean :=
@@ -8786,11 +8768,9 @@ package body Exp_Ch4 is
       --  records because there may be padding or undefined fields.
 
       elsif Unnest_Subprogram_Mode
-        and then Ekind (Typl) in E_Class_Wide_Type
-                               | E_Class_Wide_Subtype
+        and then Ekind (Typl) in Access_Protected_Kind
+                               | Class_Wide_Kind
                                | E_Access_Subprogram_Type
-                               | E_Access_Protected_Subprogram_Type
-                               | E_Anonymous_Access_Protected_Subprogram_Type
                                | E_Exception_Type
         and then Present (Equivalent_Type (Typl))
         and then Is_Record_Type (Equivalent_Type (Typl))
@@ -10169,12 +10149,10 @@ package body Exp_Ch4 is
 
       if Is_Elementary_Type (Typ)
         and then Sloc (Entity (N)) = Standard_Location
-        and then not (Ekind (Typ) in E_Class_Wide_Type
-                              | E_Class_Wide_Subtype
-                              | E_Access_Subprogram_Type
-                              | E_Access_Protected_Subprogram_Type
-                              | E_Anonymous_Access_Protected_Subprogram_Type
-                              | E_Exception_Type
+        and then not (Ekind (Typ) in Access_Protected_Kind
+                                   | Class_Wide_Kind
+                                   | E_Access_Subprogram_Type
+                                   | E_Exception_Type
                         and then Present (Equivalent_Type (Typ))
                         and then Is_Record_Type (Equivalent_Type (Typ)))
       then
@@ -11553,10 +11531,6 @@ package body Exp_Ch4 is
       procedure Real_Range_Check;
       --  Handles generation of range check for real target value
 
-      function Has_Extra_Accessibility (Id : Entity_Id) return Boolean;
-      --  True iff Present (Effective_Extra_Accessibility (Id)) successfully
-      --  evaluates to True.
-
       function Statically_Deeper_Relation_Applies (Targ_Typ : Entity_Id)
         return Boolean;
       --  Given a target type for a conversion, determine whether the
@@ -12069,22 +12043,6 @@ package body Exp_Ch4 is
          Rewrite (Expr, New_Occurrence_Of (Tnn, Loc));
       end Real_Range_Check;
 
-      -----------------------------
-      -- Has_Extra_Accessibility --
-      -----------------------------
-
-      --  Returns true for a formal of an anonymous access type or for an Ada
-      --  2012-style stand-alone object of an anonymous access type.
-
-      function Has_Extra_Accessibility (Id : Entity_Id) return Boolean is
-      begin
-         if Is_Formal (Id) or else Ekind (Id) in E_Constant | E_Variable then
-            return Present (Effective_Extra_Accessibility (Id));
-         else
-            return False;
-         end if;
-      end Has_Extra_Accessibility;
-
       ----------------------------------------
       -- Statically_Deeper_Relation_Applies --
       ----------------------------------------
@@ -12364,9 +12322,9 @@ package body Exp_Ch4 is
          --  subprogram call. Note that other checks may still need to be
          --  applied below (such as tagged type checks).
 
-         elsif Is_Entity_Name (Operand_Acc)
-           and then Has_Extra_Accessibility (Entity (Operand_Acc))
-           and then Ekind (Etype (Operand_Acc)) = E_Anonymous_Access_Type
+         elsif Ekind (Etype (Operand_Acc)) = E_Anonymous_Access_Type
+           and then Is_Entity_Name (Operand_Acc)
+           and then Present (Extra_Accessibility (Entity (Operand_Acc)))
            and then (Nkind (Original_Node (N)) /= N_Attribute_Reference
                       or else Attribute_Name (Original_Node (N)) = Name_Access)
            and then not No_Dynamic_Accessibility_Checks_Enabled (N)
@@ -12380,7 +12338,7 @@ package body Exp_Ch4 is
                null;
 
             else
-               Apply_Accessibility_Check
+               Apply_Accessibility_Check_For_Conversion
                  (Operand, Target_Type, Insert_Node => Operand);
             end if;
 
@@ -12539,6 +12497,17 @@ package body Exp_Ch4 is
          --  Start of processing for Tagged_Conversion
 
          begin
+            --  When the operand is a qualified expression of an aggregate,
+            --  force its evaluation by capturing its value in a constant
+            --  (to ensure full initialization of the tagged object).
+
+            if Nkind (Operand) = N_Qualified_Expression
+              and then Nkind (Expression (Operand)) in N_Aggregate
+                                                     | N_Extension_Aggregate
+            then
+               Force_Evaluation (Operand, Mode => Strict);
+            end if;
+
             --  Handle entities from the limited view
 
             if Is_Access_Type (Operand_Type) then
@@ -13662,7 +13631,9 @@ package body Exp_Ch4 is
       --  cannot invoke Process_Transients_In_Expression on it since it is not
       --  a transient object (it has the lifetime of the original object).
 
-      if Needs_Finalization (Base_Type (Etype (Obj_Id))) then
+      if Needs_Finalization (Base_Type (Etype (Obj_Id)))
+        and then not Is_Return_Object (Obj_Id)
+      then
          Master_Node_Id := Make_Temporary (Loc, 'N');
          Master_Node_Decl :=
            Make_Master_Node_Declaration (Loc, Master_Node_Id, Obj_Id);
@@ -15234,10 +15205,15 @@ package body Exp_Ch4 is
 
       Decl := First (Stmts);
       while Present (Decl) loop
-         if Nkind (Decl) = N_Object_Declaration
-           and then Is_Finalizable_Transient (Decl, Expr)
-         then
-            Process_Transient_In_Expression (Decl);
+         if Nkind (Decl) = N_Object_Declaration then
+            if Is_Finalizable_Transient (Decl, Expr) then
+               Process_Transient_In_Expression (Decl);
+
+            elsif Chars (Defining_Identifier (Decl)) = Name_uChain then
+               Insert_After_And_Analyze (Last (Stmts),
+                 Make_Task_Activation_Call
+                   (Sloc (Decl), Defining_Identifier (Decl)));
+            end if;
          end if;
 
          Next (Decl);

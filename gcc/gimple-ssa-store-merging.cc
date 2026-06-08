@@ -22,7 +22,7 @@
    of constant values, values loaded from memory, bitwise operations on those,
    or bit-field values, to consecutive locations, into fewer wider stores.
 
-   For example, if we have a sequence peforming four byte stores to
+   For example, if we have a sequence performing four byte stores to
    consecutive memory locations:
    [p     ] := imm1;
    [p + 1B] := imm2;
@@ -1570,7 +1570,7 @@ maybe_optimize_vector_constructor (gimple *cur_stmt)
       break;
     case 32:
       if (builtin_decl_explicit_p (BUILT_IN_BSWAP32)
-	  && optab_handler (bswap_optab, SImode) != CODE_FOR_nothing)
+	  && can_open_code_p (bswap_optab, SImode))
 	{
 	  load_type = uint32_type_node;
 	  fndecl = builtin_decl_explicit (BUILT_IN_BSWAP32);
@@ -1581,10 +1581,7 @@ maybe_optimize_vector_constructor (gimple *cur_stmt)
       break;
     case 64:
       if (builtin_decl_explicit_p (BUILT_IN_BSWAP64)
-	  && (optab_handler (bswap_optab, DImode) != CODE_FOR_nothing
-	      || (word_mode == SImode
-		  && builtin_decl_explicit_p (BUILT_IN_BSWAP32)
-		  && optab_handler (bswap_optab, SImode) != CODE_FOR_nothing)))
+	  && can_open_code_p (bswap_optab, DImode))
 	{
 	  load_type = uint64_type_node;
 	  fndecl = builtin_decl_explicit (BUILT_IN_BSWAP64);
@@ -1631,10 +1628,9 @@ pass_optimize_bswap::execute (function *fun)
   tree bswap32_type = NULL_TREE, bswap64_type = NULL_TREE;
 
   bswap32_p = (builtin_decl_explicit_p (BUILT_IN_BSWAP32)
-	       && optab_handler (bswap_optab, SImode) != CODE_FOR_nothing);
+	       && can_open_code_p (bswap_optab, SImode));
   bswap64_p = (builtin_decl_explicit_p (BUILT_IN_BSWAP64)
-	       && (optab_handler (bswap_optab, DImode) != CODE_FOR_nothing
-		   || (bswap32_p && word_mode == SImode)));
+	       && can_open_code_p (bswap_optab, DImode));
 
   /* Determine the argument type of the builtins.  The code later on
      assumes that the return and argument type are the same.  */
@@ -3134,15 +3130,12 @@ imm_store_chain_info::try_coalesce_bswap (merged_store_group *merged_store,
 	break;
       case 32:
 	if (builtin_decl_explicit_p (BUILT_IN_BSWAP32)
-	    && optab_handler (bswap_optab, SImode) != CODE_FOR_nothing)
+	    && can_open_code_p (bswap_optab, SImode))
 	  break;
 	return false;
       case 64:
 	if (builtin_decl_explicit_p (BUILT_IN_BSWAP64)
-	    && (optab_handler (bswap_optab, DImode) != CODE_FOR_nothing
-		|| (word_mode == SImode
-		    && builtin_decl_explicit_p (BUILT_IN_BSWAP32)
-		    && optab_handler (bswap_optab, SImode) != CODE_FOR_nothing)))
+	    && can_open_code_p (bswap_optab, DImode))
 	  break;
 	return false;
       default:
@@ -3624,7 +3617,7 @@ get_location_for_stmts (vec<gimple *> &stmts)
   return UNKNOWN_LOCATION;
 }
 
-/* Used to decribe a store resulting from splitting a wide store in smaller
+/* Used to describe a store resulting from splitting a wide store in smaller
    regularly-sized stores in split_group.  */
 
 class split_store

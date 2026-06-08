@@ -44,6 +44,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "opts.h"
 #include "gcc-urlifier.h"
 #include "contracts.h" // build_contract_check ()
+#include "builtins.h"
 
 /* Keep track of forward references to immediate-escalating functions in
    case they become consteval.  This vector contains ADDR_EXPRs and
@@ -880,7 +881,29 @@ cp_gimplify_expr (tree *expr_p, gimple_seq *pre_p, gimple_seq *post_p)
 	      = build1 (NOP_EXPR, fnptrtype, CALL_EXPR_FN (*expr_p));
 	}
       if (!CALL_EXPR_FN (*expr_p))
-	/* Internal function call.  */;
+	/* Internal function call.  */
+	switch (CALL_EXPR_IFN (*expr_p))
+	  {
+	  case IFN_BSWAP:
+	  case IFN_BITREVERSE:
+	    if (ret == GS_OK)
+	      {
+		location_t loc = EXPR_LOCATION (*expr_p);
+		internal_fn ifn = CALL_EXPR_IFN (*expr_p);
+		tree arg = CALL_EXPR_ARG (*expr_p, 0);
+		tree r = fold_build_builtin_bswapg_bitreverseg (loc, ifn,
+								arg);
+		if (TREE_CODE (r) == CALL_EXPR
+		    && !CALL_EXPR_FN (r)
+		    && CALL_EXPR_IFN (r) == ifn)
+		  break;
+		*expr_p = r;
+		return ret;
+	      }
+	    break;
+	  default:
+	    break;
+	  }
       else if (CALL_EXPR_REVERSE_ARGS (*expr_p))
 	{
 	  /* This is a call to a (compound) assignment operator that used
@@ -1955,13 +1978,7 @@ cp_genericize_r (tree *stmt_p, int *walk_subtrees, void *data)
   if ((TREE_CODE (stmt) == VAR_DECL
        || TREE_CODE (stmt) == PARM_DECL
        || TREE_CODE (stmt) == RESULT_DECL)
-      && DECL_HAS_VALUE_EXPR_P (stmt)
-      /* Walk DECL_VALUE_EXPR mainly for benefit of xobj lambdas so that we
-	 adjust any invisiref object parm uses within the capture proxies.
-	 TODO: For GCC 17 do this walking unconditionally.  */
-      && current_function_decl
-      && DECL_XOBJ_MEMBER_FUNCTION_P (current_function_decl)
-      && LAMBDA_FUNCTION_P (current_function_decl))
+      && DECL_HAS_VALUE_EXPR_P (stmt))
     {
       tree ve = DECL_VALUE_EXPR (stmt);
       cp_walk_tree (&ve, cp_genericize_r, data, NULL);

@@ -69,7 +69,7 @@ along with GCC; see the file COPYING3.  If not see
  ******************************************************************************/
 
 /* Default implementation of recognize that performs matching, validation and
-   replacement of nodes but that can be overriden if required.  */
+   replacement of nodes but that can be overridden if required.  */
 
 static bool
 vect_pattern_validate_optab (internal_fn ifn, slp_tree node)
@@ -517,7 +517,7 @@ class complex_pattern : public vect_pattern
    statement is created as call to internal function IFN with m_num_args
    arguments.
 
-   Futhermore the new pattern is also added to the vectorization information
+   Furthermore the new pattern is also added to the vectorization information
    structure VINFO and the old statement STMT_INFO is marked as unused while
    the new statement is marked as used and the number of SLP uses of the new
    statement is incremented.
@@ -850,11 +850,11 @@ compatible_complex_nodes_p (slp_compat_nodes_map_t *compat_cache,
 }
 
 
-/* Check to see if the oprands to two multiplies, 2 each in LEFT_OP and
+/* Check to see if the operands to two multiplies, 2 each in LEFT_OP and
    RIGHT_OP match a complex multiplication  or complex multiply-and-accumulate
    or complex multiply-and-subtract pattern.  Do this using the permute cache
    PERM_CACHE and the combination compatibility list COMPAT_CACHE.  If
-   the operation is successful the macthing operands are returned in OPS and
+   the operation is successful the matching operands are returned in OPS and
    _STATUS indicates if the operation matched includes a conjugate of one of the
    operands.  If the operation succeeds True is returned, otherwise False and
    the values in ops are meaningless.  */
@@ -1038,6 +1038,11 @@ complex_mul_pattern::matches (complex_operation_t op,
   if (op != MINUS_PLUS)
     return IFN_LAST;
 
+  /* It's only valid to form FMAs and MUL with -ffp-contract=fast.  */
+  if (flag_fp_contract_mode != FP_CONTRACT_FAST
+      && FLOAT_TYPE_P (SLP_TREE_VECTYPE (*node)))
+    return IFN_LAST;
+
   auto childs = *ops;
   auto l0node = SLP_TREE_CHILDREN (childs[0]);
 
@@ -1050,11 +1055,8 @@ complex_mul_pattern::matches (complex_operation_t op,
   auto_vec<slp_tree> left_op, right_op;
   slp_tree add0 = NULL;
 
-  /* Check if we may be a multiply add.  It's only valid to form FMAs
-     with -ffp-contract=fast.  */
+  /* Check if we may be a multiply add.  */
   if (!mul0
-      && (flag_fp_contract_mode == FP_CONTRACT_FAST
-	  || !FLOAT_TYPE_P (SLP_TREE_VECTYPE (*node)))
       && vect_match_expression_p (l0node[0], PLUS_EXPR))
     {
       auto vals = SLP_TREE_CHILDREN (l0node[0]);
@@ -1283,6 +1285,11 @@ complex_fms_pattern::matches (complex_operation_t op,
 
   slp_tree root = *ref_node;
   if (!vect_match_expression_p (root, MINUS_EXPR))
+    return IFN_LAST;
+
+  /* It's only valid to form FMSs with -ffp-contract=fast.  */
+  if (flag_fp_contract_mode != FP_CONTRACT_FAST
+      && FLOAT_TYPE_P (SLP_TREE_VECTYPE (*ref_node)))
     return IFN_LAST;
 
   /* TODO: Support invariants here, with the new layout CADD now

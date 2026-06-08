@@ -1463,7 +1463,7 @@ get_proc_name (const char *name, gfc_symbol **result, bool module_fcn_entry)
 	}
     }
 
-  /* C1246 (R1225) MODULE shall appear only in the function-stmt or
+  /* F2023: C1247 (R1526) MODULE shall appear only in the function-stmt or
      subroutine-stmt of a module subprogram or of a nonabstract interface
      body that is declared in the scoping unit of a module or submodule.  */
   if (sym->attr.external
@@ -1472,12 +1472,24 @@ get_proc_name (const char *name, gfc_symbol **result, bool module_fcn_entry)
       && !current_attr.module_procedure
       && sym->attr.proc == PROC_MODULE
       && gfc_state_stack->state == COMP_CONTAINS)
-    {
-      gfc_error_now ("Procedure %qs defined in interface body at %L "
-		     "clashes with internal procedure defined at %C",
-		     name, &sym->declared_at);
-      return true;
-    }
+    gfc_error_now ("Procedure %qs defined in interface body at %L "
+		   "clashes with internal procedure defined at %C",
+		   name, &sym->declared_at);
+
+  /* This is the converse requirement: The separate-module-subprogram for a
+     module procedure shall have the MODULE prefix or be declared a MODULE
+     PROCEDURE, otherwise it would be ambiguous.  */
+  if (sym->attr.module_procedure
+      && (sym->attr.subroutine || sym->attr.function)
+      && sym->attr.if_source == IFSRC_IFBODY
+      && !current_attr.module_procedure
+      && sym->attr.proc == PROC_MODULE
+      && gfc_state_stack->state == COMP_CONTAINS
+      && gfc_state_stack->previous
+      && gfc_state_stack->previous->state == COMP_SUBMODULE)
+    gfc_error_now ("Procedure %qs at %C requires the MODULE prefix because "
+		   "it is a module procedure declared in module %qs",
+		   name, sym->module ? sym->module : "");
 
   if (sym && !sym->gfc_new
       && sym->attr.flavor != FL_UNKNOWN
@@ -3086,6 +3098,25 @@ variable_decl (int elem)
 	{
 	  gfc_free_array_spec (cp_as);
 	}
+    }
+  else
+    {
+      /* Check to see if this is the declaration of the type and/or attributes
+	 of an implicit function result, emanating from a module function
+	 interface declared within the parent module or submodule of a
+	 containing submodule.  */
+      gfc_find_symbol (name, gfc_current_ns, 0, &sym);
+      if (gfc_current_state () == COMP_FUNCTION
+	  && sym == gfc_current_block ()
+	  && sym->attr.if_source == IFSRC_DECL
+	  && sym->attr.used_in_submodule
+	  && sym == sym->result
+	  && sym->ts.type != BT_UNKNOWN)
+	{
+	  m = MATCH_YES;
+	  goto cleanup;
+	}
+      sym = NULL;
     }
 
   /* Procedure pointer as function result.  */
@@ -7271,7 +7302,7 @@ copy_prefix (symbol_attribute *dest, locus *where)
 	dest->recursive = 1;
 
       /* Module procedures are unusual in that the 'dest' is copied from
-	 the interface declaration. However, this is an oportunity to
+	 the interface declaration. However, this is an opportunity to
 	 check that the submodule declaration is compliant with the
 	 interface.  */
       if (dest->elemental && !current_attr.elemental)
@@ -8409,7 +8440,7 @@ add_global_entry (const char *name, const char *binding_label, bool sub,
       else
 	{
 	  s->type = type;
-	  s->sym_name = name;
+	  s->sym_name = gfc_get_string ("%s", name);
 	  s->binding_label = binding_label;
 	  s->where = *where;
 	  s->defined = 1;
@@ -12844,11 +12875,13 @@ const ext_attr_t ext_attr_list[] = {
   { "cdecl",        EXT_ATTR_CDECL,        "cdecl"     },
   { "stdcall",      EXT_ATTR_STDCALL,      "stdcall"   },
   { "fastcall",     EXT_ATTR_FASTCALL,     "fastcall"  },
-  { "no_arg_check", EXT_ATTR_NO_ARG_CHECK, NULL        },
+  { "no_arg_check", EXT_ATTR_NO_ARG_CHECK, NULL	       },
   { "deprecated",   EXT_ATTR_DEPRECATED,   NULL	       },
   { "noinline",     EXT_ATTR_NOINLINE,     NULL	       },
   { "noreturn",     EXT_ATTR_NORETURN,     NULL	       },
   { "weak",	    EXT_ATTR_WEAK,	   NULL	       },
+  { "inline",       EXT_ATTR_INLINE,       NULL	       },
+  { "always_inline",EXT_ATTR_ALWAYS_INLINE,NULL	       },
   { NULL,           EXT_ATTR_LAST,         NULL        }
 };
 
@@ -12924,6 +12957,27 @@ gfc_match_gcc_attributes (void)
 	return MATCH_ERROR;
 
       sym->attr.ext_attr |= attr.ext_attr;
+
+      /* INLINE and ALWAYS_INLINE are incompatible with NOINLINE.  In the
+	 middle-end the DECL_UNINLINABLE flag set by NOINLINE always wins, so
+	 the inline request would be silently ignored.  Warn and drop it.  */
+      if (sym->attr.ext_attr & (1 << EXT_ATTR_NOINLINE))
+	{
+	  if (sym->attr.ext_attr & (1 << EXT_ATTR_ALWAYS_INLINE))
+	    {
+	      gfc_warning (0, "Attribute %<ALWAYS_INLINE%> at %C is "
+			   "incompatible with %<NOINLINE%> for %qs and will "
+			   "be ignored", sym->name);
+	      sym->attr.ext_attr &= ~(1 << EXT_ATTR_ALWAYS_INLINE);
+	    }
+	  if (sym->attr.ext_attr & (1 << EXT_ATTR_INLINE))
+	    {
+	      gfc_warning (0, "Attribute %<INLINE%> at %C is incompatible "
+			   "with %<NOINLINE%> for %qs and will be ignored",
+			   sym->name);
+	      sym->attr.ext_attr &= ~(1 << EXT_ATTR_INLINE);
+	    }
+	}
 
       if (gfc_match_eos () == MATCH_YES)
 	break;

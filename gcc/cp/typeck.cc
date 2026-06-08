@@ -4162,7 +4162,8 @@ cp_build_array_ref (location_t loc, tree array, tree idx,
     return error_mark_node;
 
   /* 0[array] */
-  if (TREE_CODE (TREE_TYPE (idx)) == ARRAY_TYPE)
+  if (TREE_CODE (TREE_TYPE (idx)) == ARRAY_TYPE
+      && TREE_CODE (TREE_TYPE (array)) != ARRAY_TYPE)
     {
       std::swap (array, idx);
 
@@ -5953,6 +5954,44 @@ cp_build_binary_op (const op_location_t &location,
 	  return cp_build_binary_op (location, code, op0, op1, complain);
 	}
 
+      if (warn_constant_logical_operand
+	  && (complain & tf_warning)
+	  && (code0 == INTEGER_TYPE || code0 == ENUMERAL_TYPE)
+	  && (code1 == INTEGER_TYPE || code1 == ENUMERAL_TYPE))
+	{
+	  tree cop0 = fold_for_warn (op0), cop1 = fold_for_warn (op1);
+	  const char *name
+	    = ((code == TRUTH_ANDIF_EXPR || code == TRUTH_AND_EXPR)
+	       ? "&&" : "||");
+	  auto enum_other_than_0_1 = [] (tree type) {
+	    if (TREE_CODE (type) != ENUMERAL_TYPE)
+	      return false;
+	    for (tree l = TYPE_VALUES (type); l; l = TREE_CHAIN (l))
+	      {
+		tree v = DECL_INITIAL (TREE_VALUE (l));
+		if (!integer_zerop (v) && !integer_onep (v))
+		  return true;
+	      }
+	    return false;
+	  };
+	  auto diagnose_constant_logical_operand = [=] (tree val, tree type) {
+	    if (TREE_CODE (val) != INTEGER_CST || integer_zerop (val))
+	      return false;
+	    if (integer_onep (val) && !enum_other_than_0_1 (type))
+	      return false;
+	    gcc_rich_location richloc (location);
+	    richloc.add_fixit_replace (name + 1);
+	    auto_diagnostic_group d;
+	    if (warning_at (location, OPT_Wconstant_logical_operand,
+			    "use of logical %qs with constant operand %qE",
+			    name, val))
+	      inform (&richloc, "use %qs for bitwise operation", name + 1);
+	    return true;
+	  };
+	  if (!diagnose_constant_logical_operand (cop1, orig_type1))
+	    diagnose_constant_logical_operand (cop0, orig_type0);
+	}
+
       result_type = boolean_type_node;
       break;
 
@@ -7069,6 +7108,71 @@ build_x_shufflevector (location_t loc, vec<tree, va_gc> *args,
     {
       exp = build_min_non_dep_call_vec (exp, NULL, args);
       CALL_EXPR_IFN (exp) = IFN_SHUFFLEVECTOR;
+    }
+  return exp;
+}
+
+/* Build __builtin_bswapg (ARG) or __builtin_bitreverseg (ARG).  */
+tree
+build_x_bswapg_bitreverseg (location_t loc, internal_fn ifn,
+			    vec<tree, va_gc> *args, tsubst_flags_t complain)
+{
+  const char *name
+    = ifn == IFN_BSWAP ? "__builtin_bswapg" : "__builtin_bitreverseg";
+  if (args->length () != 1)
+    {
+      if (complain & tf_error)
+	error_at (loc, "wrong number of arguments to %qs", name);
+      return error_mark_node;
+    }
+  tree arg = (*args)[0];
+  if (type_dependent_expression_p (arg))
+    {
+      tree exp = build_min_nt_call_vec (NULL, args);
+      CALL_EXPR_IFN (exp) = ifn;
+      return exp;
+    }
+  tree type = TYPE_MAIN_VARIANT (TREE_TYPE (arg));
+  if (!INTEGRAL_TYPE_P (type))
+    {
+      if (complain & tf_error)
+	error_at (loc, "%qs operand not an integral type", name);
+      return error_mark_node;
+    }
+  if (TREE_CODE (type) == ENUMERAL_TYPE)
+    {
+      if (complain & tf_error)
+	error_at (loc, "argument %u in call to function "
+		       "%qs has enumerated type", 1, name);
+      return error_mark_node;
+    }
+  if (TREE_CODE (type) == BOOLEAN_TYPE)
+    {
+      if (complain & tf_error)
+	error_at (loc, "argument %u in call to function "
+		       "%qs has boolean type", 1, name);
+      return error_mark_node;
+    }
+  if (!TYPE_UNSIGNED (type))
+    {
+      if (complain & tf_error)
+	error_at (loc, "argument 1 in call to function "
+		       "%qs has signed type", name);
+      return error_mark_node;
+    }
+  if (ifn == IFN_BSWAP && (TYPE_PRECISION (type) % 8) != 0)
+    {
+      if (complain & tf_error)
+	error_at (loc, "precision %d of argument 1 to function "
+		       "%qs is not a multiple of 8",
+		  TYPE_PRECISION (type), name);
+      return error_mark_node;
+    }
+  tree exp = build_call_expr_internal_loc (loc, ifn, type, 1, arg);
+  if (processing_template_decl)
+    {
+      exp = build_min_non_dep_call_vec (exp, NULL, args);
+      CALL_EXPR_IFN (exp) = ifn;
     }
   return exp;
 }

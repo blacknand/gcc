@@ -569,7 +569,7 @@ string_length (const void *ptr, unsigned eltsize, unsigned maxelts)
    than what a C strlen call would return.
 
    ELTSIZE is 1 for normal single byte character strings, and 2 or
-   4 for wide characer strings.  ELTSIZE is by default 1.
+   4 for wide character strings.  ELTSIZE is by default 1.
 
    The value returned is of type `ssizetype'.  */
 
@@ -928,7 +928,7 @@ expand_builtin_setjmp_setup (rtx buf_addr, rtx receiver_label)
 
 /* Construct the trailing part of a __builtin_setjmp call.  This is
    also called directly by the SJLJ exception handling code.
-   If RECEIVER_LABEL is NULL, instead contruct a nonlocal goto handler.  */
+   If RECEIVER_LABEL is NULL, instead construct a nonlocal goto handler.  */
 
 void
 expand_builtin_setjmp_receiver (rtx receiver_label)
@@ -7662,7 +7662,7 @@ inline_expand_builtin_bytecmp (tree exp, rtx target)
 		       || fcode == BUILT_IN_STRNCMP
 		       || fcode == BUILT_IN_MEMCMP);
 
-  /* On a target where the type of the call (int) has same or narrower presicion
+  /* On a target where the type of the call (int) has same or narrower precision
      than unsigned char, give up the inlining expansion.  */
   if (TYPE_PRECISION (unsigned_char_type_node)
       >= TYPE_PRECISION (TREE_TYPE (exp)))
@@ -7828,8 +7828,7 @@ expand_builtin_crc_table_based (internal_fn fn, scalar_mode crc_mode,
   else
     /* If it's IFN_CRC_REV generate bit-reversed CRC.  */
     expand_reversed_crc_table_based (target, op1, op2, op3,
-				     data_mode,
-				     generate_reflecting_code_standard);
+				     data_mode);
   return target;
 }
 
@@ -8180,6 +8179,17 @@ expand_builtin (tree exp, rtx target, rtx subtarget, machine_mode mode,
     case BUILT_IN_BSWAP64:
     case BUILT_IN_BSWAP128:
       target = expand_builtin_bswap (target_mode, exp, target, subtarget);
+      if (target)
+	return target;
+      break;
+
+    case BUILT_IN_BITREVERSE8:
+    case BUILT_IN_BITREVERSE16:
+    case BUILT_IN_BITREVERSE32:
+    case BUILT_IN_BITREVERSE64:
+    case BUILT_IN_BITREVERSE128:
+      target = expand_builtin_unop (target_mode, exp, target, subtarget,
+				    bitreverse_optab);
       if (target)
 	return target;
       break;
@@ -10473,7 +10483,7 @@ fold_builtin_bit_query (location_t loc, enum built_in_function fcode,
       /* Only keep second argument to IFN_CLZ/IFN_CTZ if it is the
 	 value defined at zero during GIMPLE, or for large/huge _BitInt
 	 (which are then lowered during bitint lowering).  */
-      if (arg2 && TREE_CODE (TREE_TYPE (arg0)) != BITINT_TYPE)
+      if (arg2 && !BITINT_TYPE_P (TREE_TYPE (arg0)))
 	{
 	  int val;
 	  if (fcode == BUILT_IN_CLZG)
@@ -10510,6 +10520,53 @@ fold_builtin_bit_query (location_t loc, enum built_in_function fcode,
 			call, arg1);
 
   return call;
+}
+
+/* Fold or build a __builtin_bswapg (ARG) (if IFN is IFN_BSWAP) or
+   __builtin_bitreverseg (ARG (otherwise) call.  The FE should have
+   verified earlier that the argument type is unsigned INTEGER_TYPE
+   or BITINT_TYPE, for __builtin_bswapg with precision divisible by 8.  */
+
+tree
+fold_build_builtin_bswapg_bitreverseg (location_t loc, enum internal_fn ifn,
+				       tree arg)
+{
+  tree type = TYPE_MAIN_VARIANT (TREE_TYPE (arg));
+  if (ifn == IFN_BSWAP && TYPE_PRECISION (type) == 8)
+    return fold_convert_loc (loc, type, arg);
+  struct { tree type; built_in_function bswap, bitreverse; } fns[]
+    = { { unsigned_char_type_node, END_BUILTINS, BUILT_IN_BITREVERSE8 },
+	{ uint16_type_node, BUILT_IN_BSWAP16, BUILT_IN_BITREVERSE16 },
+	{ uint32_type_node, BUILT_IN_BSWAP32, BUILT_IN_BITREVERSE32 },
+	{ uint64_type_node, BUILT_IN_BSWAP64, BUILT_IN_BITREVERSE64 },
+	{ uint128_type_node, BUILT_IN_BSWAP128, BUILT_IN_BITREVERSE128 } };
+  if (TREE_CODE (arg) == INTEGER_CST)
+    {
+      wide_int res;
+      if (ifn == IFN_BSWAP)
+	res = wi::bswap (wi::to_wide (arg));
+      else
+	res = wi::bitreverse (wi::to_wide (arg));
+      return wide_int_to_tree (type, res);
+    }
+  for (unsigned i = 0; i < ARRAY_SIZE (fns); ++i)
+    if (fns[i].type
+	&& TYPE_PRECISION (fns[i].type) >= TYPE_PRECISION (type))
+      {
+	arg = fold_convert_loc (loc, fns[i].type, arg);
+	tree fndecl
+	  = builtin_decl_explicit (ifn == IFN_BSWAP
+				   ? fns[i].bswap : fns[i].bitreverse);
+	tree ret = build_call_expr_loc (loc, fndecl, 1, arg);
+	if (TYPE_PRECISION (type) != TYPE_PRECISION (fns[i].type))
+	  ret = fold_build2_loc (loc, RSHIFT_EXPR, fns[i].type, ret,
+				 build_int_cst (unsigned_type_node,
+						TYPE_PRECISION (fns[i].type)
+						- TYPE_PRECISION (type)));
+	return fold_convert_loc (loc, type, ret);
+      }
+  gcc_assert (TREE_CODE (type) == BITINT_TYPE);
+  return build_call_expr_internal_loc (loc, ifn, type, 1, arg);
 }
 
 /* Fold __builtin_{add,sub}c{,l,ll} into pair of internal functions
@@ -12343,6 +12400,11 @@ is_inexpensive_builtin (tree decl)
       case BUILT_IN_BSWAP32:
       case BUILT_IN_BSWAP64:
       case BUILT_IN_BSWAP128:
+      case BUILT_IN_BITREVERSE8:
+      case BUILT_IN_BITREVERSE16:
+      case BUILT_IN_BITREVERSE32:
+      case BUILT_IN_BITREVERSE64:
+      case BUILT_IN_BITREVERSE128:
       case BUILT_IN_CLZ:
       case BUILT_IN_CLZIMAX:
       case BUILT_IN_CLZL:

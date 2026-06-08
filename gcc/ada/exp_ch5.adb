@@ -32,6 +32,7 @@ with Einfo.Entities; use Einfo.Entities;
 with Einfo.Utils;    use Einfo.Utils;
 with Elists;         use Elists;
 with Exp_Aggr;       use Exp_Aggr;
+with Exp_Ch3;        use Exp_Ch3;
 with Exp_Ch6;        use Exp_Ch6;
 with Exp_Ch7;        use Exp_Ch7;
 with Exp_Ch11;       use Exp_Ch11;
@@ -2412,6 +2413,26 @@ package body Exp_Ch5 is
       if Componentwise_Assignment (N) then
          Expand_Assign_Record (N);
          return;
+
+      --  Another special case: internally generated initialization invoking
+      --  a C++ constructor. This case corresponds with the initialization
+      --  of an aggregate component.
+
+      elsif not Comes_From_Source (N)
+        and then (No_Ctrl_Actions (N) or else No_Finalize_Actions (N))
+        and then Is_CPP_Constructor_Call (Rhs)
+      then
+         declare
+            Expr   : constant Node_Id := Relocate_Node (Rhs);
+            Id_Ref : constant Node_Id := Relocate_Node (Lhs);
+
+         begin
+            Insert_List_Before_And_Analyze (N,
+              Build_Initialization_Call (N, Id_Ref, Typ,
+                Constructor_Ref => Expr));
+            Rewrite (N, Make_Null_Statement (Loc));
+            return;
+         end;
       end if;
 
       --  Defend against invalid subscripts on left side if we are in standard
@@ -2842,7 +2863,7 @@ package body Exp_Ch5 is
          Apply_Constraint_Check (Rhs, Etype (Lhs));
       end if;
 
-      --  Ada 2012 (AI05-148): Update current accessibility level if Rhs is a
+      --  Ada 2012 (AI05-148): Update current accessibility level if Lhs is a
       --  stand-alone obj of an anonymous access type. Do not install the check
       --  when the Lhs denotes a container cursor and the Next function employs
       --  an access type, because this can never result in a dangling pointer.
@@ -2850,68 +2871,29 @@ package body Exp_Ch5 is
       if Is_Access_Type (Typ)
         and then Is_Entity_Name (Lhs)
         and then Ekind (Entity (Lhs)) /= E_Loop_Parameter
-        and then Present (Effective_Extra_Accessibility (Entity (Lhs)))
+        and then Present (Extra_Accessibility (Entity (Lhs)))
       then
-         declare
-            function Lhs_Entity return Entity_Id;
-            --  Look through renames to find the underlying entity.
-            --  For assignment to a rename, we don't care about the
-            --  Enclosing_Dynamic_Scope of the rename declaration.
+         if not Accessibility_Checks_Suppressed (Entity (Lhs)) then
+            Insert_Action (N,
+              Make_Raise_Program_Error (Loc,
+                Condition =>
+                  Make_Op_Gt (Loc,
+                    Left_Opnd  =>
+                      Accessibility_Level (Rhs, Dynamic_Level),
+                    Right_Opnd =>
+                      Accessibility_Level (Lhs, Object_Decl_Level)),
+                Reason => PE_Accessibility_Check_Failed));
+         end if;
 
-            ----------------
-            -- Lhs_Entity --
-            ----------------
-
-            function Lhs_Entity return Entity_Id is
-               Result : Entity_Id := Entity (Lhs);
-
-            begin
-               while Present (Renamed_Object (Result)) loop
-
-                  --  Renamed_Object must return an Entity_Name here
-                  --  because of preceding "Present (E_E_A (...))" test.
-
-                  Result := Entity (Renamed_Object (Result));
-               end loop;
-
-               return Result;
-            end Lhs_Entity;
-
-            --  Local Declarations
-
-            Access_Check : constant Node_Id :=
-                             Make_Raise_Program_Error (Loc,
-                               Condition =>
-                                 Make_Op_Gt (Loc,
-                                   Left_Opnd  =>
-                                     Accessibility_Level (Rhs, Dynamic_Level),
-                                   Right_Opnd =>
-                                     Make_Integer_Literal (Loc,
-                                       Intval =>
-                                         Scope_Depth
-                                           (Enclosing_Dynamic_Scope
-                                             (Lhs_Entity)))),
-                               Reason => PE_Accessibility_Check_Failed);
-
-            Access_Level_Update : constant Node_Id :=
-                                    Make_Assignment_Statement (Loc,
-                                     Name       =>
-                                       New_Occurrence_Of
-                                         (Effective_Extra_Accessibility
-                                            (Entity (Lhs)), Loc),
-                                     Expression =>
-                                       Accessibility_Level
-                                         (Expr            => Rhs,
-                                          Level           => Dynamic_Level,
-                                          Allow_Alt_Model => False));
-
-         begin
-            if not Accessibility_Checks_Suppressed (Entity (Lhs)) then
-               Insert_Action (N, Access_Check);
-            end if;
-
-            Insert_Action (N, Access_Level_Update);
-         end;
+         Insert_Action (N,
+           Make_Assignment_Statement (Loc,
+             Name       =>
+               New_Occurrence_Of (Extra_Accessibility (Entity (Lhs)), Loc),
+             Expression =>
+               Accessibility_Level
+                 (Expr            => Rhs,
+                  Level           => Dynamic_Level,
+                  Allow_Alt_Model => False)));
       end if;
 
       --  Case of assignment to a bit packed array element. If there is a
@@ -4629,22 +4611,40 @@ package body Exp_Ch5 is
       Element_Op : constant Entity_Id :=
                      Get_Iterable_Type_Primitive (Container_Typ, Name_Element);
 
+      Constant_Reference_Op : constant Entity_Id :=
+                     Get_Iterable_Type_Primitive
+                       (Container_Typ, Name_Constant_Reference);
+
       Advance   : Node_Id;
       Init      : Node_Id;
       New_Loop  : Node_Id;
       Block     : Node_Id;
 
    begin
-      --  For an element iterator, the Element aspect must be present,
-      --  (this is checked during analysis).
+      --  For an element iterator, either the Element or the Constant_Reference
+      --  aspect must be present, (this is checked during analysis).
 
-      --  We create a block to hold a variable declaration initialized with
-      --  a call to Element, and generate:
+      --  If Element is present, we create a block to hold a variable
+      --  declaration initialized with a call to Element, and generate:
 
       --    Cursor : Cursor_Type := First (Container);
       --    while Has_Element (Cursor, Container) loop
       --       declare
       --          Elmt : Element_Type := Element (Container, Cursor);
+      --       begin
+      --          <original loop statements>
+      --          Cursor := Next (Container, Cursor);
+      --       end;
+      --    end loop;
+
+      --  If Constant_Reference is present, we introduce a constant and a
+      --  renaming, and generate:
+
+      --    Cursor : Cursor_Type := First (Container);
+      --    while Has_Element (Cursor, Container) loop
+      --       declare
+      --          Elmt : Element_Type renames
+      --             Constant_Reference (Container, Cursor).all;
       --       begin
       --          <original loop statements>
       --          Cursor := Next (Container, Cursor);
@@ -4665,17 +4665,36 @@ package body Exp_Ch5 is
 
       --  Declaration for Element
 
-      Elmt_Decl :=
-        Make_Object_Declaration (Loc,
-          Defining_Identifier => Element,
-          Object_Definition   => New_Occurrence_Of (Etype (Element_Op), Loc));
+      if Present (Element_Op) then
+         Elmt_Decl :=
+           Make_Object_Declaration (Loc,
+             Defining_Identifier => Element,
+             Object_Definition   =>
+                New_Occurrence_Of (Etype (Element_Op), Loc));
 
-      Set_Expression (Elmt_Decl,
-        Make_Function_Call (Loc,
-          Name                   => New_Occurrence_Of (Element_Op, Loc),
-          Parameter_Associations => New_List (
-            Convert_To_Iterable_Type (Container, Loc),
-            New_Occurrence_Of (Cursor, Loc))));
+         Set_Expression (Elmt_Decl,
+           Make_Function_Call (Loc,
+             Name                   => New_Occurrence_Of (Element_Op, Loc),
+             Parameter_Associations => New_List (
+               Convert_To_Iterable_Type (Container, Loc),
+               New_Occurrence_Of (Cursor, Loc))));
+      else
+         Elmt_Decl :=
+           Make_Object_Renaming_Declaration (Loc,
+             Defining_Identifier => Element,
+             Subtype_Mark        =>
+               New_Occurrence_Of
+                 (Directly_Designated_Type
+                    (Etype (Constant_Reference_Op)), Loc),
+             Name                =>
+               Make_Explicit_Dereference (Loc,
+                 Prefix => Make_Function_Call (Loc,
+                    Name                   =>
+                      New_Occurrence_Of (Constant_Reference_Op, Loc),
+                    Parameter_Associations => New_List (
+                      Convert_To_Iterable_Type (Container, Loc),
+                      New_Occurrence_Of (Cursor, Loc)))));
+      end if;
 
       Block :=
         Make_Block_Statement (Loc,

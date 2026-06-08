@@ -139,6 +139,9 @@ rs6000_invalid_builtin (enum rs6000_gen_builtins fncode)
     case ENB_MMA:
       error ("%qs requires the %qs option", name, "-mmma");
       break;
+    case ENB_FUTURE:
+      error ("%qs requires the %qs option", name, "-mcpu=future");
+      break;
     default:
     case ENB_ALWAYS:
       gcc_unreachable ();
@@ -194,6 +197,8 @@ rs6000_builtin_is_supported (enum rs6000_gen_builtins fncode)
       return TARGET_HTM;
     case ENB_MMA:
       return TARGET_MMA;
+    case ENB_FUTURE:
+      return TARGET_FUTURE;
     default:
       gcc_unreachable ();
     }
@@ -756,6 +761,21 @@ rs6000_init_builtins (void)
   else
     ieee128_float_type_node = NULL_TREE;
 
+  /* PTImode to get even/odd register pairs.  */
+  if (TARGET_POWERPC64)
+    {
+      intPTI_type_internal_node = make_signed_type (GET_MODE_BITSIZE (PTImode));
+      SET_TYPE_MODE (intPTI_type_internal_node, PTImode);
+      t = build_qualified_type (intPTI_type_internal_node, TYPE_QUAL_CONST);
+      lang_hooks.types.register_builtin_type (intPTI_type_internal_node,
+					      "__pti_internal");
+
+      uintPTI_type_internal_node = make_unsigned_type (GET_MODE_BITSIZE (PTImode));
+      SET_TYPE_MODE (uintPTI_type_internal_node, PTImode);
+      t = build_qualified_type (uintPTI_type_internal_node, TYPE_QUAL_CONST);
+      lang_hooks.types.register_builtin_type (uintPTI_type_internal_node,
+					      "__upti_internal");
+    }
   /* Vector pair and vector quad support.  */
   vector_pair_type_node = make_node (OPAQUE_TYPE);
   SET_TYPE_MODE (vector_pair_type_node, OOmode);

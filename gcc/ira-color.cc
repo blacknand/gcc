@@ -349,7 +349,7 @@ create_new_allocno_hard_regs_node (allocno_hard_regs_t hv)
 	      ira_allocate (sizeof (struct allocno_hard_regs_node)));
   new_node->check = 0;
   new_node->hard_regs = hv;
-  new_node->hard_regs_num = hard_reg_set_size (hv->set);
+  new_node->hard_regs_num = hard_reg_set_popcount (hv->set);
   new_node->first = NULL;
   new_node->used_p = false;
   return new_node;
@@ -505,8 +505,6 @@ print_hard_reg_set (FILE *f, HARD_REG_SET set, bool new_line_p)
 	{
 	  if (start == end)
 	    fprintf (f, " %d", start);
-	  else if (start == end + 1)
-	    fprintf (f, " %d %d", start, end);
 	  else
 	    fprintf (f, " %d-%d", start, end);
 	  start = -1;
@@ -2109,8 +2107,9 @@ assign_hard_reg (ira_allocno_t a, bool retry_p)
 				  full_costs[hri] += cost;
 				}
 			    };
+			  enum machine_mode a_mode = ALLOCNO_MODE (a);
 			  for (int r = hard_regno;
-			       r >= 0 && (int) end_hard_regno (mode, r) > hard_regno;
+			       r >= 0 && (int) end_hard_regno (a_mode, r) > hard_regno;
 			       r--)
 			    note_conflict (r);
 			  for (int r = hard_regno + 1;
@@ -5116,7 +5115,7 @@ ira_mark_new_stack_slot (rtx x, int regno, poly_uint64 total_size)
    given IN and OUT for INSN.  Return also number points (through
    EXCESS_PRESSURE_LIVE_LENGTH) where the pseudo-register lives and
    the register pressure is high, number of references of the
-   pseudo-registers (through NREFS), the number of psuedo registers
+   pseudo-registers (through NREFS), the number of pseudo registers
    whose allocated register wouldn't need saving in the prologue
    (through CALL_USED_COUNT), and the first hard regno occupied by the
    pseudo-registers (through FIRST_HARD_REGNO).  */

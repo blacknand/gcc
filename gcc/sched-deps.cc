@@ -2739,7 +2739,7 @@ sched_analyze_2 (class deps_desc *deps, rtx x, rtx_insn *insn)
 	 a jump insn which usually generates MOVE_BARRIER preventing
 	 to move insns containing registers or memories through the
 	 barrier.  It is also wrong with generated code performance
-	 point of view as prefetch withouth dependecies will have a
+	 point of view as prefetch without dependencies will have a
 	 tendency to be issued later instead of earlier.  It is hard
 	 to generate accurate dependencies for prefetch insns as
 	 prefetch has only the start address but it is better to have
@@ -3149,22 +3149,22 @@ sched_analyze_insn (class deps_desc *deps, rtx x, rtx_insn *insn)
 	    }
 	}
 
-      for (i = 0; i < FIRST_PSEUDO_REGISTER; i++)
-	if (TEST_HARD_REG_BIT (implicit_reg_pending_uses, i))
-	  {
-	    struct deps_reg *reg_last = &deps->reg_last[i];
-	    add_dependence_list (insn, reg_last->sets, 0, REG_DEP_TRUE, false);
-	    add_dependence_list (insn, reg_last->implicit_sets, 0,
-				 REG_DEP_ANTI, false);
-	    add_dependence_list (insn, reg_last->clobbers, 0, REG_DEP_TRUE,
-				 false);
+      hard_reg_set_iterator hrsi;
+      EXECUTE_IF_SET_IN_HARD_REG_SET (implicit_reg_pending_uses, 0, i, hrsi)
+	{
+	  struct deps_reg *reg_last = &deps->reg_last[i];
+	  add_dependence_list (insn, reg_last->sets, 0, REG_DEP_TRUE, false);
+	  add_dependence_list (insn, reg_last->implicit_sets, 0,
+			       REG_DEP_ANTI, false);
+	  add_dependence_list (insn, reg_last->clobbers, 0, REG_DEP_TRUE,
+			       false);
 
-	    if (!deps->readonly)
-	      {
-		reg_last->uses = alloc_INSN_LIST (insn, reg_last->uses);
-		reg_last->uses_length++;
-	      }
-	  }
+	  if (!deps->readonly)
+	    {
+	      reg_last->uses = alloc_INSN_LIST (insn, reg_last->uses);
+	      reg_last->uses_length++;
+	    }
+	}
 
       if (targetm.sched.exposed_pipeline)
 	{
@@ -3309,20 +3309,20 @@ sched_analyze_insn (class deps_desc *deps, rtx x, rtx_insn *insn)
 	}
     }
 
-  for (i = 0; i < FIRST_PSEUDO_REGISTER; i++)
-    if (TEST_HARD_REG_BIT (implicit_reg_pending_clobbers, i))
-      {
-	struct deps_reg *reg_last = &deps->reg_last[i];
-	add_dependence_list (insn, reg_last->sets, 0, REG_DEP_ANTI, false);
-	add_dependence_list (insn, reg_last->clobbers, 0, REG_DEP_ANTI, false);
-	add_dependence_list (insn, reg_last->uses, 0, REG_DEP_ANTI, false);
-	add_dependence_list (insn, reg_last->control_uses, 0, REG_DEP_ANTI,
-			     false);
+  hard_reg_set_iterator hrsi;
+  EXECUTE_IF_SET_IN_HARD_REG_SET (implicit_reg_pending_clobbers, 0, i, hrsi)
+    {
+      struct deps_reg *reg_last = &deps->reg_last[i];
+      add_dependence_list (insn, reg_last->sets, 0, REG_DEP_ANTI, false);
+      add_dependence_list (insn, reg_last->clobbers, 0, REG_DEP_ANTI, false);
+      add_dependence_list (insn, reg_last->uses, 0, REG_DEP_ANTI, false);
+      add_dependence_list (insn, reg_last->control_uses, 0, REG_DEP_ANTI,
+			   false);
 
 	if (!deps->readonly)
 	  reg_last->implicit_sets
 	    = alloc_INSN_LIST (insn, reg_last->implicit_sets);
-      }
+    }
 
   if (!deps->readonly)
     {

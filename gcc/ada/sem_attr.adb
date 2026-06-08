@@ -37,6 +37,7 @@ with Elists;         use Elists;
 with Errout;         use Errout;
 with Eval_Fat;
 with Exp_Dist;       use Exp_Dist;
+with Exp_Put_Image;  use Exp_Put_Image;
 with Exp_Util;       use Exp_Util;
 with Expander;       use Expander;
 with Freeze;         use Freeze;
@@ -1518,6 +1519,8 @@ package body Sem_Attr is
          if Nkind (Subp_Decl) not in N_Abstract_Subprogram_Declaration
                                    | N_Entry_Declaration
                                    | N_Expression_Function
+                                   | N_Formal_Abstract_Subprogram_Declaration
+                                   | N_Formal_Concrete_Subprogram_Declaration
                                    | N_Full_Type_Declaration
                                    | N_Generic_Subprogram_Declaration
                                    | N_Subprogram_Body
@@ -3576,6 +3579,144 @@ package body Sem_Attr is
          end if;
 
          Set_Etype (N, RTE (RE_Asm_Output_Operand));
+
+      --------
+      -- At --
+      --------
+
+      when Attribute_At =>
+         Check_E1;
+
+         --  Set the type of the attribute now to ensure the successful
+         --  continuation of analysis even if the attribute is misplaced.
+
+         Set_Etype (N, P_Type);
+
+         --  We start with the same checks as for goto statements. The final
+         --  check rejects references to forward labels, which are allowed for
+         --  goto, but not for this attribute.
+
+         if not (Nkind (E1) = N_Identifier
+                   and then Ekind (Entity (E1)) = E_Label)
+         then
+            Error_Attr ("label expected", E1);
+         elsif not Reachable (Entity (E1)) then
+            Error_Attr ("label is not reachable", E1);
+         elsif Sloc (E1) < Sloc (Entity (E1)) then
+            Error_Attr ("forward label reference", E1);
+         end if;
+
+         declare
+            function Check_Goto (Stmt : Node_Id) return Traverse_Result;
+            --  Detect goto statements that "jump over" the attribute label
+
+            function Check_Reference (Ref : Node_Id) return Traverse_Result;
+            --  Check if reference denotes entity visible at the location of
+            --  the referenced label or declared within the prefix itself.
+
+            function Declared_Within_Prefix (E : Entity_Id) return Boolean;
+            --  Return True iff E is declared within the attribute prefix
+
+            Label_Depth : constant Unat := Scope_Depth (Scope (Entity (E1)));
+            --  Scope depth at the label
+
+            -------------
+            -- Check_Goto --
+            -------------
+
+            function Check_Goto (Stmt : Node_Id) return Traverse_Result is
+            begin
+               --  Check if the target of a goto statement is located past the
+               --  label appearing in the attribute expression.
+
+               if Nkind (Stmt) in N_Goto_Statement | N_Goto_When_Statement
+                 and then Sloc (Entity (Name (Stmt))) > Sloc (Entity (E1))
+               then
+                  Error_Msg_Sloc := Sloc (Stmt);
+                  Error_Msg_N
+                    ("!attribute label is skipped by goto at #", N);
+                  return Skip;
+
+               --  Stop once we reached the attribute label
+
+               elsif Nkind (Stmt) = N_Label
+                 and then Entity (Identifier (Stmt)) = Entity (E1)
+               then
+                  return Abandon;
+
+               --  Skip constructs where a goto jump will not be allowed anyway
+
+               elsif Nkind (Stmt) in N_Package_Declaration
+                                   | N_Package_Body
+                                   | N_Subprogram_Body
+                                   | N_Generic_Declaration
+                                   | N_Single_Task_Declaration
+                                   | N_Task_Type_Declaration
+                                   | N_Single_Protected_Declaration
+                                   | N_Protected_Type_Declaration
+                                   | N_Protected_Body
+                                   | N_Task_Body
+               then
+                  return Skip;
+
+               else
+                  return OK;
+               end if;
+            end Check_Goto;
+
+            ---------------------
+            -- Check_Reference --
+            ---------------------
+
+            function Check_Reference (Ref : Node_Id) return Traverse_Result is
+            begin
+               --  To check if referenced entity is visible at the label we
+               --  simply compare the scope depth.
+
+               if Nkind (Ref) = N_Identifier
+                 and then Present (Entity (Ref))
+                 and then Scope_Depth (Scope (Entity (Ref))) > Label_Depth
+                 and then not Declared_Within_Prefix (Entity (Ref))
+               then
+                  Error_Msg_Sloc := Sloc (Entity (E1));
+                  Error_Msg_NE ("!& is not visible at #", N, Entity (Ref));
+               end if;
+
+               return OK;
+            end Check_Reference;
+
+            ----------------------------
+            -- Declared_Within_Prefix --
+            ----------------------------
+
+            function Declared_Within_Prefix (E : Entity_Id) return Boolean is
+               Context : Node_Id;
+
+            begin
+               Context := E;
+               while Present (Context) loop
+                  if Context = P then
+                     return True;
+
+                  --  Prevent the search from going too far
+
+                  elsif Is_Body_Or_Package_Declaration (Context) then
+                     return False;
+                  end if;
+
+                  Context := Parent (Context);
+               end loop;
+
+               return False;
+            end Declared_Within_Prefix;
+
+            procedure Check_Gotos is new Traverse_Proc (Check_Goto);
+            procedure Check_References is new Traverse_Proc (Check_Reference);
+
+         begin
+            Check_Gotos (Parent (Label_Construct (Parent (Entity (E1)))));
+            Check_References (P);
+         end;
 
       -----------------------------
       -- Atomic_Always_Lock_Free --
@@ -6173,7 +6314,13 @@ package body Sem_Attr is
                   --  Otherwise the prefix denotes some unrelated function
 
                   else
-                     Error_Msg_Name_2 := Chars (Spec_Id);
+                     if Is_Access_To_Subprogram_Wrapper (Spec_Id) then
+                        Error_Msg_Name_2 :=
+                          Chars (Etype (Last_Formal (Spec_Id)));
+                     else
+                        Error_Msg_Name_2 := Chars (Spec_Id);
+                     end if;
+
                      Error_Attr
                        ("incorrect prefix for attribute %, expected %", P);
                   end if;
@@ -6184,8 +6331,17 @@ package body Sem_Attr is
                elsif Is_Access_Subprogram_Type (Pref_Id) then
                   if Pref_Id = Spec_Id then
                      Set_Etype (N, Etype (Designated_Type (Spec_Id)));
+
+                  --  Otherwise the prefix denotes some unrelated function
+
                   else
-                     Error_Msg_Name_2 := Chars (Spec_Id);
+                     if Is_Access_To_Subprogram_Wrapper (Spec_Id) then
+                        Error_Msg_Name_2 :=
+                          Chars (Etype (Last_Formal (Spec_Id)));
+                     else
+                        Error_Msg_Name_2 := Chars (Spec_Id);
+                     end if;
+
                      Error_Attr
                        ("incorrect prefix for attribute %, expected %", P);
                   end if;
@@ -7244,9 +7400,7 @@ package body Sem_Attr is
 
          --  Copy all characters in Full_Name
 
-         for J in 1 .. String_Length (Full_Name) loop
-            Store_String_Char (Get_String_Char (Full_Name, Pos (J)));
-         end loop;
+         Store_String_Chars (Full_Name);
 
          --  Compute CRC and convert it to string one character at a time, so
          --  as not to use Image within the compiler.
@@ -7345,14 +7499,14 @@ package body Sem_Attr is
                Start_String;
 
                if Negative then
-                  Store_String_Char (Get_Char_Code ('-'));
+                  Store_String_Char ('-');
                end if;
 
                S := Sloc (Expr);
                Src := Source_Text (Get_Source_File_Index (S));
 
                while Src (S) /= ';' and then Src (S) /= ' ' loop
-                  Store_String_Char (Get_Char_Code (Src (S)));
+                  Store_String_Char (Src (S));
                   S := S + 1;
                end loop;
 
@@ -7821,26 +7975,11 @@ package body Sem_Attr is
             --  Do not emit any diagnostics related to private types to avoid
             --  disclosing the structure of the type.
 
-            elsif Is_Private_Type (P_Type) then
-
-               --  Attribute 'Valid_Scalars is not supported on private tagged
-               --  types due to a code generation issue. Is_Visible_Component
-               --  does not allow for a component of a private tagged type to
-               --  be successfully retrieved.
-               --  ??? This attribute should simply ignore type privacy
-               --  (see Validated_View). It should examine components of the
-               --  tagged type extensions (if any) and recursively examine
-               --  'Valid_Scalars of the parent's type (if any).
-
-               --  Do not use Error_Attr_P because this bypasses any subsequent
-               --  processing and leaves the attribute with type Any_Type. This
-               --  in turn prevents the proper expansion of the attribute into
-               --  True.
-
-               if Is_Tagged_Type (P_Type) then
-                  Error_Msg_Name_1 := Aname;
-                  Error_Msg_N ("??effects of attribute % are ignored", N);
-               end if;
+            elsif Is_Private_Type (P_Type)
+              or else (Is_Class_Wide_Type (P_Type)
+                        and then Is_Private_Type (Root_Type (P_Type)))
+            then
+               null;
 
             --  Otherwise the type is not private
 
@@ -8096,6 +8235,10 @@ package body Sem_Attr is
       function Mantissa return Uint;
       --  Returns the Mantissa value for the prefix type
 
+      procedure Fold_Compile_Time_Known_Enumeration_Image (Expr : Node_Id);
+      --  Folds 'Image of a compile-time known enumeration value into a string
+      --  literal whose contents depend on whether names are available.
+
       procedure Set_Bounds;
       --  Used for First, Last and Length attributes applied to an array or
       --  array subtype. Sets the variables Lo_Bound and Hi_Bound to the low
@@ -8192,6 +8335,37 @@ package body Sem_Attr is
              and then
            Compile_Time_Known_Value (Type_High_Bound (Typ));
       end Compile_Time_Known_Bounds;
+
+      -----------------------------------------------
+      -- Fold_Compile_Time_Known_Enumeration_Image --
+      -----------------------------------------------
+
+      procedure Fold_Compile_Time_Known_Enumeration_Image (Expr : Node_Id) is
+         Lit : constant Entity_Id := Expr_Value_E (Expr);
+         Typ : constant Entity_Id := First_Subtype (Etype (Expr));
+
+      begin
+         pragma Assert (Ekind (Lit) = E_Enumeration_Literal);
+
+         Start_String;
+
+         --  If Discard_Names is in effect for the type, either specifically
+         --  or globally, then we emit the numeric representation of the 'Pos
+         --  attribute of the enumeration literal with a leading space.
+
+         if Discard_Names (Typ) or else Global_Discard_Names then
+            UI_Image (Enumeration_Pos (Lit), Decimal);
+            Store_String_Char  (' ');
+            Store_String_Chars (UI_Image_Buffer (1 .. UI_Image_Length));
+         else
+            Get_Unqualified_Decoded_Name_String (Chars (Lit));
+            Set_Casing (All_Upper_Case);
+            Store_String_Chars (Name_Buffer (1 .. Name_Len));
+         end if;
+
+         Rewrite (N, Make_String_Literal (Loc, Strval => End_String));
+         Analyze_And_Resolve (N, Standard_String);
+      end Fold_Compile_Time_Known_Enumeration_Image;
 
       ----------------
       -- Fore_Value --
@@ -8478,43 +8652,20 @@ package body Sem_Attr is
 
       --  Attribute 'Img applied to a static enumeration value is static, and
       --  we will do the folding right here (things get confused if we let this
-      --  case go through the normal circuitry).
+      --  case go through the normal circuitry) provided that the default Image
+      --  implementation has not been overridden. Likewise for 'Image applied
+      --  to an object, except that it is never static, see a few lines below.
 
-      if Id = Attribute_Img
-        and then Is_Entity_Name (P)
-        and then Is_Enumeration_Type (Etype (Entity (P)))
-        and then Is_OK_Static_Expression (P)
+      if (Id = Attribute_Img
+           or else (Id = Attribute_Image and then Is_Object_Reference (P)))
+        and then Is_Enumeration_Type (Etype (P))
+        and then not Is_Character_Type (Etype (P))
+        and then Compile_Time_Known_Value (P)
+        and then not Image_Must_Call_Put_Image (N)
       then
-         declare
-            Lit : constant Entity_Id := Expr_Value_E (P);
-            Typ : constant Entity_Id := Etype (Entity (P));
-            Str : String_Id;
-
-         begin
-            Start_String;
-
-            --  If Discard_Names is in effect for the type, then we emit the
-            --  numeric representation of the prefix literal 'Pos attribute,
-            --  prefixed with a single space.
-
-            if Discard_Names (Typ) then
-               UI_Image (Enumeration_Pos (Lit), Decimal);
-               Store_String_Char  (' ');
-               Store_String_Chars (UI_Image_Buffer (1 .. UI_Image_Length));
-            else
-               Get_Unqualified_Decoded_Name_String (Chars (Lit));
-               Set_Casing (All_Upper_Case);
-               Store_String_Chars (Name_Buffer (1 .. Name_Len));
-            end if;
-
-            Str := End_String;
-
-            Rewrite (N, Make_String_Literal (Loc, Strval => Str));
-            Analyze_And_Resolve (N, Standard_String);
-            Set_Is_Static_Expression (N, True);
-         end;
-
-         return;
+         Fold_Compile_Time_Known_Enumeration_Image (P);
+         Set_Is_Static_Expression
+           (N, Id = Attribute_Img and then Is_OK_Static_Expression (P));
       end if;
 
       --  Special processing for cases where the prefix is an object or value,
@@ -9716,32 +9867,19 @@ package body Sem_Attr is
       -- Image --
       -----------
 
-      --  Image is a scalar attribute, but is never static, because it is
-      --  not a static function (having a non-scalar argument (RM 4.9(22)).
+      --  Image is a scalar attribute, but is never static, because it is not
+      --  a static function (as having a non-scalar result type (RM 4.9(22)).
       --  However, we can constant-fold the image of an enumeration literal
-      --  if names are available and default Image implementation has not
-      --  been overridden.
+      --  if the default Image implementation has not been overridden.
 
       when Attribute_Image =>
-         if Is_Entity_Name (E1)
-           and then Ekind (Entity (E1)) = E_Enumeration_Literal
-           and then not Discard_Names (First_Subtype (Etype (E1)))
-           and then not Global_Discard_Names
-           and then not Has_Aspect (Etype (E1), Aspect_Put_Image)
+         if Is_Enumeration_Type (Etype (P))
+           and then not Is_Character_Type (Etype (P))
+           and then Compile_Time_Known_Value (E1)
+           and then not Image_Must_Call_Put_Image (N)
          then
-            declare
-               Lit : constant Entity_Id := Entity (E1);
-               Str : String_Id;
-            begin
-               Start_String;
-               Get_Unqualified_Decoded_Name_String (Chars (Lit));
-               Set_Casing (All_Upper_Case);
-               Store_String_Chars (Name_Buffer (1 .. Name_Len));
-               Str := End_String;
-               Rewrite (N, Make_String_Literal (Loc, Strval => Str));
-               Analyze_And_Resolve (N, Standard_String);
-               Set_Is_Static_Expression (N, False);
-            end;
+            Fold_Compile_Time_Known_Enumeration_Image (E1);
+            Set_Is_Static_Expression (N, False);
          end if;
 
       -------------------
@@ -11356,6 +11494,7 @@ package body Sem_Attr is
          | Attribute_Address_Size
          | Attribute_Asm_Input
          | Attribute_Asm_Output
+         | Attribute_At
          | Attribute_Base
          | Attribute_Bit_Order
          | Attribute_Bit_Position
@@ -11705,8 +11844,16 @@ package body Sem_Attr is
                   --  spec expressions). The profile of the subprogram is not
                   --  frozen at this point.
 
+                  --  Taking the 'Access of an expression function freezes its
+                  --  expression (RM 13.14(10.3)).
+
                   if not Preanalysis_Active then
-                     Freeze_Before (N, Entity (P), Do_Freeze_Profile => False);
+                     if Is_Expression_Function (Entity (P)) then
+                        Freeze_Expression (P);
+                     else
+                        Freeze_Before
+                          (N, Entity (P), Do_Freeze_Profile => False);
+                     end if;
                   end if;
 
                --  If it is a type, there is nothing to resolve.
@@ -11715,7 +11862,12 @@ package body Sem_Attr is
 
                elsif Is_Overloadable (Entity (P)) then
                   if not Preanalysis_Active then
-                     Freeze_Before (N, Entity (P), Do_Freeze_Profile => False);
+                     if Is_Expression_Function (Entity (P)) then
+                        Freeze_Expression (P);
+                     else
+                        Freeze_Before
+                          (N, Entity (P), Do_Freeze_Profile => False);
+                     end if;
                   end if;
 
                --  Nothing to do if prefix is a type name
@@ -11770,11 +11922,8 @@ package body Sem_Attr is
                --  also be accessibility checks on those, this is where the
                --  checks can eventually be centralized ???
 
-               if Ekind (Btyp) in E_Access_Protected_Subprogram_Type
-                                | E_Access_Subprogram_Type
-                                | E_Anonymous_Access_Protected_Subprogram_Type
-                                | E_Anonymous_Access_Subprogram_Type
-               then
+               if Ekind (Btyp) in Access_Subprogram_Kind then
+
                   --  Deal with convention mismatch
 
                   if Convention (Designated_Type (Btyp)) /=
@@ -12060,14 +12209,10 @@ package body Sem_Attr is
             --  default-initialized aggregate component for a self-referential
             --  type the reference is legal.
 
-            if not (Ekind (Btyp) = E_Access_Subprogram_Type
-                     or else Ekind (Btyp) = E_Anonymous_Access_Subprogram_Type
+            if not (Ekind (Btyp) in Access_Subprogram_Kind
                      or else (Is_Record_Type (Btyp)
                                and then
                                  Present (Corresponding_Remote_Type (Btyp)))
-                     or else Ekind (Btyp) = E_Access_Protected_Subprogram_Type
-                     or else Ekind (Btyp)
-                               = E_Anonymous_Access_Protected_Subprogram_Type
                      or else Is_Access_Constant (Btyp)
                      or else Is_Variable (P)
                      or else Attr_Id = Attribute_Unrestricted_Access)
@@ -12107,27 +12252,6 @@ package body Sem_Attr is
 
             if Ekind (Btyp) in E_General_Access_Type | E_Anonymous_Access_Type
             then
-               --  Ada 2005 (AI-230): Check the accessibility of anonymous
-               --  access types for stand-alone objects, record and array
-               --  components, and return objects. For a component definition
-               --  the level is the same of the enclosing composite type.
-
-               if Ada_Version >= Ada_2005
-                 and then Attr_Id = Attribute_Access
-                 and then (Is_Local_Anonymous_Access (Btyp)
-
-                            --  Handle cases where Btyp is the anonymous access
-                            --  type of an Ada 2012 stand-alone object.
-
-                            or else Nkind (Associated_Node_For_Itype (Btyp)) =
-                                                        N_Object_Declaration)
-                 and then
-                   Static_Accessibility_Level (N, Zero_On_Dynamic_Level) >
-                     Deepest_Type_Access_Level (Btyp)
-               then
-                  Accessibility_Message (N, Typ);
-               end if;
-
                if Attr_Id /= Attribute_Unrestricted_Access
                  and then Is_Dependent_Component_Of_Mutable_Object (P)
                then
@@ -12265,46 +12389,54 @@ package body Sem_Attr is
                   end if;
                end if;
 
-               --  Check the static accessibility rule of 3.10.2(28). Note that
-               --  this check is not performed for the case of an anonymous
-               --  access type, since the access attribute is always legal
-               --  in such a context - unless the restriction
-               --  No_Dynamic_Accessibility_Checks is active.
+               --  Check the static accessibility rule of 3.10.2(28). In the
+               --  case of anonymous access types, only those of stand-alone
+               --  objects, components and results can be statically checked.
 
-               declare
-                  No_Dynamic_Acc_Checks : constant Boolean :=
-                    No_Dynamic_Accessibility_Checks_Enabled (Btyp);
+               if Attr_Id = Attribute_Access then
+                  declare
+                     No_Dynamic_Acc_Checks : constant Boolean :=
+                       No_Dynamic_Accessibility_Checks_Enabled (Btyp);
 
-                  Compatible_Alt_Checks : constant Boolean :=
-                    No_Dynamic_Acc_Checks and then not Debug_Flag_Underscore_B;
+                     Compatible_Alt_Checks : constant Boolean :=
+                       No_Dynamic_Acc_Checks
+                         and then not Debug_Flag_Underscore_B;
 
-               begin
-                  if Attr_Id = Attribute_Access
-                    and then (Ekind (Btyp) = E_General_Access_Type
-                               or else No_Dynamic_Acc_Checks)
+                  begin
+                     if (Ekind (Btyp) = E_General_Access_Type
+                          or else
+                            (Ada_Version >= Ada_2005
+                              and then
+                                (Is_Local_Anonymous_Access (Btyp)
 
-                    --  In the case of the alternate "compatibility"
-                    --  accessibility model we do not perform a static
-                    --  accessibility check on actuals for anonymous access
-                    --  types - so exclude them here.
+                                  --  Case where Btyp is the anonymous access
+                                  --  type of an Ada 2012 stand-alone object.
 
-                    and then not (Compatible_Alt_Checks
-                                   and then Is_Actual_Parameter (N)
-                                   and then Ekind (Btyp)
-                                              = E_Anonymous_Access_Type)
+                                  or else
+                                    Nkind (Associated_Node_For_Itype (Btyp)) =
+                                                        N_Object_Declaration)
 
-                    and then
-                      Static_Accessibility_Level (N, Zero_On_Dynamic_Level) >
-                        Deepest_Type_Access_Level (Btyp)
-                  then
-                     Accessibility_Message (N, Typ);
-                  end if;
-               end;
+                              --  In the case of the alternate "compatibility"
+                              --  accessibility model we do not make a static
+                              --  accessibility check on actuals for anonymous
+                              --  access types - so exclude them here.
+
+                              and then not (Compatible_Alt_Checks
+                                             and then Is_Actual_Parameter (N)))
+
+                          or else No_Dynamic_Acc_Checks)
+
+                       and then
+                         Static_Accessibility_Level (P, Zero_On_Dynamic_Level)
+                           > Deepest_Type_Access_Level (Btyp)
+                     then
+                        Accessibility_Message (N, Typ);
+                     end if;
+                  end;
+               end if;
             end if;
 
-            if Ekind (Btyp) in E_Access_Protected_Subprogram_Type
-                             | E_Anonymous_Access_Protected_Subprogram_Type
-            then
+            if Ekind (Btyp) in Access_Protected_Kind then
                if Is_Entity_Name (P)
                  and then not Is_Protected_Type (Scope (Entity (P)))
                then
@@ -12496,8 +12628,8 @@ package body Sem_Attr is
                   Scop      : constant Entity_Id := Scope (Subp_Id);
                   Subp_Decl : constant Node_Id   :=
                                 Unit_Declaration_Node (Subp_Id);
-                  Flag_Id   : Entity_Id;
-                  Subp_Body : Node_Id;
+
+                  Flag_Id : Entity_Id;
 
                --  If the access has been taken and the body of the subprogram
                --  has not been see yet, indirect calls must be protected with
@@ -12549,58 +12681,6 @@ package body Sem_Attr is
                      --  where processing depends on correct scope setting.
 
                      Set_Scope (Flag_Id, Scop);
-                  end if;
-
-                  --  Taking the 'Access of an expression function freezes its
-                  --  expression (RM 13.14 10.3/3). This does not apply to an
-                  --  expression function that acts as a completion because the
-                  --  generated body is immediately analyzed and the expression
-                  --  is automatically frozen.
-
-                  if Is_Expression_Function (Subp_Id)
-                    and then Present (Corresponding_Body (Subp_Decl))
-                  then
-                     Subp_Body :=
-                       Unit_Declaration_Node (Corresponding_Body (Subp_Decl));
-
-                     --  The body has already been analyzed when the expression
-                     --  function acts as a completion.
-
-                     if Analyzed (Subp_Body) then
-                        null;
-
-                     --  Attribute 'Access may appear within the generated body
-                     --  of the expression function subject to the attribute:
-
-                     --    function F is (... F'Access ...);
-
-                     --  If the expression function is on the scope stack, then
-                     --  the body is currently being analyzed. Do not reanalyze
-                     --  it because this will lead to infinite recursion.
-
-                     elsif In_Open_Scopes (Subp_Id) then
-                        null;
-
-                     --  If reference to the expression function appears in an
-                     --  inner scope, for example as an actual in an instance,
-                     --  this is not a freeze point either.
-
-                     elsif Scope (Subp_Id) /= Current_Scope then
-                        null;
-
-                     --  Dispatch tables are not a freeze point either
-
-                     elsif Nkind (Parent (N)) = N_Unchecked_Type_Conversion
-                       and then Is_Dispatch_Table_Entity (Etype (Parent (N)))
-                     then
-                        null;
-
-                      --  Analyze the body of the expression function to freeze
-                      --  the expression.
-
-                     else
-                        Analyze (Subp_Body);
-                     end if;
                   end if;
                end;
             end if;

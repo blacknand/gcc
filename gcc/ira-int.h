@@ -937,7 +937,7 @@ public:
   /* Flag of that the above array has been initialized.  */
   bool x_ira_prohibited_mode_move_regs_initialized_p;
 
-  /* Number of real occurences of hard regs before IRA.  */
+  /* Number of real occurrences of hard regs before IRA.  */
   size_t x_ira_hard_regno_nrefs[FIRST_PSEUDO_REGISTER];
 };
 
@@ -1435,18 +1435,6 @@ ira_hard_reg_set_intersection_p (int hard_regno, machine_mode mode,
     if (TEST_HARD_REG_BIT (hard_regset, hard_regno + i))
       return true;
   return false;
-}
-
-/* Return number of hard registers in hard register SET.  */
-inline int
-hard_reg_set_size (HARD_REG_SET set)
-{
-  int i, size;
-
-  for (size = i = 0; i < FIRST_PSEUDO_REGISTER; i++)
-    if (TEST_HARD_REG_BIT (set, i))
-      size++;
-  return size;
 }
 
 /* The function returns TRUE if hard registers starting with

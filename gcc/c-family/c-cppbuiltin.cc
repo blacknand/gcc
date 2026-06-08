@@ -1122,6 +1122,7 @@ c_cpp_builtins (cpp_reader *pfile)
 	    cpp_define (pfile, "__cpp_impl_reflection=202603L");
 	  else
 	    cpp_warn (pfile, "__cpp_impl_reflection");
+	  cpp_define (pfile, "__cpp_trivial_union=202502L");
 	}
       if (flag_concepts && cxx_dialect > cxx14)
 	cpp_define (pfile, "__cpp_concepts=202002L");
@@ -1377,7 +1378,7 @@ c_cpp_builtins (cpp_reader *pfile)
     }
 
   /* For fixed-point fibt, ibit, max, min, and epsilon.  */
-  if (targetm.fixed_point_supported_p ())
+  if (!c_dialect_cxx () && targetm.fixed_point_supported_p ())
     {
       builtin_define_fixed_point_constants ("SFRACT", "HR",
 					    short_fract_type_node);
@@ -2049,7 +2050,7 @@ builtin_define_type_max (const char *macro, tree type)
   builtin_define_type_minmax (NULL, macro, type);
 }
 
-/* Given a value with COUNT LSBs set, fill BUF with a hexidecimal
+/* Given a value with COUNT LSBs set, fill BUF with a hexadecimal
    representation of that value.  For example, a COUNT of 10 would
    return "0x3ff".  */
 
