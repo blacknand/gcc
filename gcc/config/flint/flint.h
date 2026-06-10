@@ -20,6 +20,11 @@
    along with GCC; see the file COPYING3.  If not see
    <http://www.gnu.org/licenses/>.  */
 
+/*
+  Look at /docs/GCC backend.md for a full explanation of a GCC backend
+  using examples from this backend for flint.
+*/
+
 #ifndef GCC_FLINT_H
 #define GCC_FLINT_H
 
@@ -99,6 +104,13 @@
    r16   SFP (virtual)
 */
 
+/* 
+  Tell GCC where the hardware register numbering ends.
+  flint has 16 hardware registers + one virtual register,
+  so registers 17 and above are pseudo/virtual registers
+  created during compilation and are not directly
+  mappable to hardware 
+*/
 #define FIRST_PSEUDO_REGISTER 17
 
 #define REGISTER_NAMES { \
@@ -106,19 +118,38 @@
   "r8",   "r9",   "r10",  "r11",  "r12",  "r13",  "r14",  "r15",  \
   "?sfp" }
 
+/*
+  Registers GCC is never allowed to use for general allocation.
+  Index 0 is r0, index 13 is sp (must never be overwritten),
+  index 16 is SFP (virtual, handled specially). 
+*/
 #define FIXED_REGISTERS		\
 { 1, 0, 0, 0, 0, 0, 0, 0,	\
   0, 0, 0, 0, 0, 1, 0, 0, \
   1 }
 
-/* Caller saved/temporary registers + args + fixed */
+/* 
+  Caller saved/temporary registers + args + fixed.
+  These are registers a function is allowed to destory.
+*/
 #define CALL_USED_REGISTERS	\
 { 1, 1, 1, 1, 1, 0, 0, 0,	\
   0, 0, 0, 0, 1, 1, 1, 1, \
   1 }
 
-/* List the order in which to allocate registers.  Each register must
-   be listed once, even those in FIXED_REGISTERS.  */
+/* 
+  List the order in which to allocate registers. Each register must
+  be listed once, even those in FIXED_REGISTERS.  
+
+  Caller-saved registers are allocated before callee-saved so GCC can
+  minimise the number of save/restore pairs it has to emit in prologues
+  and epilogues. 
+
+  r15 and r12 are listed before r1-r4 so that the argument regiters
+  are available for their intended purposes when setting up calls. The
+  pure scratch registers (r12, r15) are used up first before touching
+  the argument registers.
+*/
 #define REG_ALLOC_ORDER { \
     15, 12,                         /* caller-saved temp */ \
     1, 2, 3, 4,                     /* caller-saved argument */ \
@@ -129,11 +160,15 @@
     16,                             /* virtual SFP (fixed) */ \
 }
 
+/*
+  The absoulete minimum classes GCC will allow. flint *currently* has no
+  architectural register specialisation because every GPR can do everything.
+*/
 enum reg_class
 {
   NO_REGS,
   ALL_REGS,
-  LIM_REG_CLASSES
+  LIM_REG_CLASSES   // Sentinel value to mark num of reg classes
 };
 
 #define N_REG_CLASSES (int) LIM_REG_CLASSES
@@ -142,10 +177,17 @@ enum reg_class
   "NO_REGS", 			\
   "ALL_REGS" }
 
+/*
+  Each entry is a bitmask over the register file, 
+  Bit N is set if N is in that class.
+
+  0x0001FFFF is 17 ones for registers 0 through 16,
+  which is r0-15 + SFP.
+*/
 #define REG_CLASS_CONTENTS      \
 {                                 
     { 0x00000000 },	  \   // 0 -
-    { 0x0001FFFF },   \   // 16
+    { 0x0001FFFF },   \   // 17
 }
 
 #define REGNO_REG_CLASS(REGNO) ALL_REGS
@@ -158,12 +200,16 @@ do {                                                    \
 } while (0)
 
 /* A macro whose definition is the name of the class to which a valid
-   base register must belong.  A base register is one used in an
-   address which is the register value plus a displacement.  */
+   base register must belong. A base register is one used in an
+   address which is the register value plus a displacement. INDEX_REG_CLASS
+   is the macro telling GCC that there is no addressing mode using two registers.
+    
+   Because flint has only two register classes: NO_REGS and ALL_REGS,
+   BASE_REG_CLASS is simply ALL_REGS and INDEX_REG_CLASS is NO_REGS as
+   flint only has a single addressing mode: reg + immediate.
+   */
 #define BASE_REG_CLASS ALL_REGS
-
 #define INDEX_REG_CLASS NO_REGS
-
 
 
 /* Assembly definitions.  */
@@ -193,7 +239,14 @@ do {                                                    \
   while (0)
 
 /* Calling convention definitions.  */
-#define CUMULATIVE_ARGS int
+#define CUMULATIVE_ARGS int   // The type of the counter
+
+/* 
+  INIT_CUMULATIVE_ARGS initialises the CUMULATIVE_ARGS counter
+  to zero at the start of processing each function's argument list.
+  GCC then calls target hooks to process each argument in turn,
+  incrementing the counter each time.
+*/
 #define INIT_CUMULATIVE_ARGS(CUM, FNTYPE, LIBNAME, FNDECL, N_NAMED_ARGS) \
   do { (CUM) = 0; } while (0)
 
@@ -202,14 +255,19 @@ do {                                                    \
    3 instructions to construct the target address and jump (JALR)
    5 instructions * 4 bytes = 20 bytes. */
 #define TRAMPOLINE_SIZE      20
-#define TRAMPOLINE_ALIGNMENT 32
+#define TRAMPOLINE_ALIGNMENT 32     // 4-byte aligned
 
 /* Pointer mode */
 #define Pmode SImode
 #define FUNCTION_MODE SImode
 #define STACK_POINTER_REGNUM SP_REGNUM
+/* GCC uses r16 as the reference point for both local
+   and incoming arguments during compilation. The elimination
+   pass then sorts out the correct offsets for each case differently. */
 #define FRAME_POINTER_REGNUM SFP_REGNUM
 #define HARD_FRAME_POINTER_REGNUM HFP_REGNUM
+/* r15, the register used to pass the static chain pointer for nested
+   function calls. */
 #define STATIC_CHAIN_REGNUM SC_REGNUM
 
 /* The register number of the arg pointer register, which is used to
@@ -251,10 +309,22 @@ do {                                                    \
 
 /* Stack layout and stack pointer usage.  */
 
-/* This plus ARG_POINTER_REGNUM points to the first word of incoming args.  */
+/* This plus ARG_POINTER_REGNUM points to the first word of incoming args.  
+
+   This is the offset from the ARG pointer to the first incoming argument. 
+   Zero means the first argument lives exactly at the address AP points to, with no gap. 
+   In flint, incoming arguments sit directly above the frame boundary.
+*/
 #define FIRST_PARM_OFFSET(FNDECL) (0)
 
-/* This plus STACK_POINTER_REGNUM points to the first work of outgoing args.  */
+/* This plus STACK_POINTER_REGNUM points to the first work of outgoing args.  
+
+   On some architectures sp doesn't point to the last used word but to the next free word, 
+   or there's a reserved slot at the top of the frame. This offset accounts for that. 
+
+   Zero means sp points exactly to the last allocated word with no reserved gap. 
+   flint has no such convention so this is zero.
+*/
 #define STACK_POINTER_OFFSET (0)
 
 /* Define this macro if pushing a word onto the stack moves the stack
