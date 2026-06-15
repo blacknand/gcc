@@ -21,7 +21,7 @@
    <http://www.gnu.org/licenses/>.  */
 
 /*
-  Look at /docs/GCC backend.md for a full explanation of a GCC backend
+  Look at /docs/GCC backend.md for a partial explanation of a GCC backend
   using examples from this backend for flint.
 */
 
@@ -63,6 +63,7 @@
 #define SHORT_TYPE_SIZE 16
 #define LONG_TYPE_SIZE 32
 #define LONG_LONG_TYPE_SIZE 64
+// NOTE: probably not required for flint, kept anyway
 #define WCHAR_TYPE_SIZE 32
 
 #undef SIZE_TYPE
@@ -78,7 +79,6 @@
 /* Describing Relative Costs of Operations.  */
 #define MOVE_MAX 4
 #define SLOW_BYTE_ACCESS 1
-
 
 /* Register usage, class and contents.  */
 
@@ -168,30 +168,43 @@ enum reg_class
 {
   NO_REGS,
   ALL_REGS,
-  LIM_REG_CLASSES   // Sentinel value to mark num of reg classes
+  GENERAL_REGS,
+  LIM_REG_CLASSES   
 };
 
 #define N_REG_CLASSES (int) LIM_REG_CLASSES
 
 #define REG_CLASS_NAMES {	\
   "NO_REGS", 			\
-  "ALL_REGS" }
+  "ALL_REGS",     \
+  "GENERAL_REGS" }
 
 /*
   Each entry is a bitmask over the register file, 
   Bit N is set if N is in that class.
 
   0x0001FFFF is 17 ones for registers 0 through 16,
-  which is r0-15 + SFP.
+  which is r0-r15 + SFP.
+
+  An initializer containing the contents of the register classes, as integers which are bit masks. 
+  The nth integer specifies the contents of class n. 
+  The way the integer mask is interpreted is that register r is in the class if mask & (1 << r) is 1
 */
 #define REG_CLASS_CONTENTS      \
-{                                 
-    { 0x00000000 },	  \   // 0 -
-    { 0x0001FFFF },   \   // 17
+{                               \
+    { 0x00000000 },	            \
+    { 0x0001FFFF },             \
+    { 0x0001FFFF },             \
 }
 
 #define REGNO_REG_CLASS(REGNO) ALL_REGS
 
+/*
+  PROMOTE_MODE() tells GCC how to promote narrow integer types when they're loaded
+  into registers. On a 32-bit machine such as flint, registers are 32 bits wide. But C has
+  types smaller than that like char (8-bit) so PROMOTE_MODE tells GCC to widen the mode
+  to 32-bits.
+*/
 #define PROMOTE_MODE(MODE,UNSIGNEDP,TYPE)               \
 do {                                                    \
   if (GET_MODE_CLASS (MODE) == MODE_INT                 \
@@ -215,6 +228,8 @@ do {                                                    \
 /* Assembly definitions.  */
 #define ASM_APP_ON ""
 #define ASM_APP_OFF ""
+#define ASM_APP_ON "#APP"
+#define ASM_APP_OFF "#NO_APP"
 
 #define ASM_COMMENT_START ";; "
 
@@ -239,14 +254,7 @@ do {                                                    \
   while (0)
 
 /* Calling convention definitions.  */
-#define CUMULATIVE_ARGS int   // The type of the counter
-
-/* 
-  INIT_CUMULATIVE_ARGS initialises the CUMULATIVE_ARGS counter
-  to zero at the start of processing each function's argument list.
-  GCC then calls target hooks to process each argument in turn,
-  incrementing the counter each time.
-*/
+#define CUMULATIVE_ARGS int   
 #define INIT_CUMULATIVE_ARGS(CUM, FNTYPE, LIBNAME, FNDECL, N_NAMED_ARGS) \
   do { (CUM) = 0; } while (0)
 
@@ -261,18 +269,16 @@ do {                                                    \
 #define Pmode SImode
 #define FUNCTION_MODE SImode
 #define STACK_POINTER_REGNUM SP_REGNUM
-/* GCC uses r16 as the reference point for both local
-   and incoming arguments during compilation. The elimination
-   pass then sorts out the correct offsets for each case differently. */
+// Note: Why is FRAME_POINTER_REGNUM and ARG_POINTER_REGNUM the same?
 #define FRAME_POINTER_REGNUM SFP_REGNUM
 #define HARD_FRAME_POINTER_REGNUM HFP_REGNUM
-/* r15, the register used to pass the static chain pointer for nested
-   function calls. */
 #define STATIC_CHAIN_REGNUM SC_REGNUM
 
 /* The register number of the arg pointer register, which is used to
    access the function's argument list.  */
 #define ARG_POINTER_REGNUM SFP_REGNUM
+/* A C expression that is nonzero if REGNO is the number of a hard
+   register in which function arguments are sometimes passed.  */
 #define FUNCTION_ARG_REGNO_P(r) (r >= 1 && r <= 4)
 #define MAX_REGS_PER_ADDRESS 1
 
@@ -291,23 +297,14 @@ do {                                                    \
     (OFFSET) = flint_initial_elimination_offset ((FROM), (TO)); \
   } while (0)
 
+/* No register is ever valid for an index register, there is only rs1 + sext(imm)*/
 #define REGNO_OK_FOR_INDEX_P(REGNO) 0
-// Up to and including SFP_REGNUM which is 16
+/* Check all 16 physical registers up to and including SFP_REGNUM */
 #define REGNO_OK_FOR_BASE_P(REGNO)  ((REGNO) <= SFP_REGNUM)     // SFP_REGNUM = 16
-
-/* If defined, the maximum amount of space required for outgoing
-   arguments will be computed and placed into the variable
-   'crtl->outgoing_args_size'.  No space will be pushed
-   onto the stack for each call; instead, the function prologue
-   should increase the stack frame size by this amount.  
-   
-   In other words, GCC will pre-allocate space in the frame for all
-   outgoing arguments rather than pushing arguments onto the stack
-   one by one. */
 #define ACCUMULATE_OUTGOING_ARGS 1
 
 
-/* Stack layout and stack pointer usage.  */
+// /* Stack layout and stack pointer usage.  */
 
 /* This plus ARG_POINTER_REGNUM points to the first word of incoming args.  
 
@@ -319,24 +316,23 @@ do {                                                    \
 
 /* This plus STACK_POINTER_REGNUM points to the first work of outgoing args.  
 
-   On some architectures sp doesn't point to the last used word but to the next free word, 
-   or there's a reserved slot at the top of the frame. This offset accounts for that. 
-
-   Zero means sp points exactly to the last allocated word with no reserved gap. 
-   flint has no such convention so this is zero.
+   NOTE: because flint has no conventions which alter the offset from the SP
+   to the first location at which outgoing arguments are placed, I do not think
+   this is needed. It is just STACK_POINTER_REGNUM + 0.
 */
-#define STACK_POINTER_OFFSET (0)
+// #define STACK_POINTER_OFFSET (0)
 
 /* Define this macro if pushing a word onto the stack moves the stack
    pointer to a smaller address.  */
 #define STACK_GROWS_DOWNWARD 1
-
 #define FRAME_GROWS_DOWNWARD 1
 
 /* An alias for a machine mode name.  This is the machine mode that
    elements of a jump-table should have.  */
 #define CASE_VECTOR_MODE SImode
 
+/* Tells GCC what integer value is written to a register when a compaison
+   result is stored as a value rather than used directly as a branch condition. */
 #define STORE_FLAG_VALUE 1
 
 /* Indicates how loads of narrow mode values are loaded into words.  */
@@ -348,20 +344,18 @@ do {                                                    \
 // #define RETURN_ADDR_RTX            or1k_return_addr
 
 /* EXIT_IGNORE_STACK should be nonzero if, when returning from a function,
-   the stack pointer does not matter.  */
+   the stack pointer does not matter. By the time a function is about to execute its final RET,
+   the epilogue has already restored SP back to whatever it was on entry. */
 #define EXIT_IGNORE_STACK 1
 
 /* Always pass the SYMBOL_REF for direct calls to the expanders.
 
    Prevents GCC from caching function addresses in registers before calls. */
 #define NO_FUNCTION_CSE 1
-
 /* Emit rtl for profiling.  We don't support this, so can be empty  */
 #define NO_PROFILE_COUNTERS 1
-
 /* Emit rtl for profiling.  We don't support this, so can be empty  */
 #define PROFILE_HOOK(LABEL)
-
 /* All the work is done in PROFILE_HOOK, but this is still required.  */
 #define FUNCTION_PROFILER(STREAM, LABELNO) do { } while (0)
 

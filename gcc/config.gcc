@@ -411,6 +411,9 @@ bpf-*-*)
 	c_target_objs="bpf-c.o"
 	cxx_target_objs="bpf-c.o"
 	;;
+flint*-*-*)
+	cpu_type=flint
+	;;
 frv*)	cpu_type=frv
 	extra_options="${extra_options} g.opt"
 	;;
@@ -1833,6 +1836,12 @@ epiphany-*-elf | epiphany-*-rtems*)
 	tm_defines="${tm_defines} EPIPHANY_STACK_OFFSET=${with_stack_offset:-8}"
 	extra_headers="epiphany_intrinsics.h"
 	;;
+flint-*-elf)
+    tm_file="elfos.h newlib-stdint.h ${tm_file}"
+    tm_p_file="${tm_p_file} flint/flint-protos.h"
+    tmake_file="${tmake_file} flint/t-flint"
+    extra_options="${extra_options} flint/flint.opt"
+    ;;
 fr30-*-elf)
 	tm_file="elfos.h newlib-stdint.h ${tm_file}"
 	;;

@@ -1,8 +1,7 @@
-;; Machine description for flint
+;; Constraint definitions for flint
 ;; Copyright (C) 2018-2026 Free Software Foundation, Inc.
 ;; Contributed by Nathan Blackburn
-;; Contributed by Stafford Horne (OpenRISC)
-;; GCC-VAM was used as a reference: https://github.com/embecosm/gcc-vam/commit/97863f37b4a844e596214f12d13f9b7e0b979b16
+;; Modified from or1k (Stafford Horne)
 
 ;; This file is part of GCC.
 
@@ -21,27 +20,15 @@
 ;; <http://www.gnu.org/licenses/>.
 
 ;; -------------------------------------------------------------------------
-;; flint specific constraints, predicates and attributes
+;; Constraints
 ;; -------------------------------------------------------------------------
 
-(include "constraints.md")
-(include "predicates.md")
+(define_constraint "I"
+    "A signed 14-bit immediate within the range of -8192 to 8191."
+    (and (match_code "const_int")
+         (match_test "IN_RANGE(ival, -8192, 8191)")))
 
-;; Register numbers
-(define_constants
-  [(HFP_REGNUM 5)
-   (SP_REGNUM 13)
-   (LR_REGNUM 14)
-   (SC_REGNUM 15)
-   (SFP_REGNUM 16)]
-)
-
-
-;; -------------------------------------------------------------------------
-;; nop instruction
-;; -------------------------------------------------------------------------
-
-(define_insn "nop"
-  [(const_int 0)]
-  ""
-  "l.nop")
+(define_constraint "0"
+    "Constant 0."
+    (and (match_code "const_int")
+         (match_test "ival == 0")))
