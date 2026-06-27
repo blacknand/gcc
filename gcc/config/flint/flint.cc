@@ -220,6 +220,16 @@ flint_legitimate_address_p(machine_mode, rtx x, bool strict_p, code_helper = ERR
       return REGNO_OK_FOR_BASE_P(regno);
 }
 
+/* Tells GCC what RTX represents the return value of a function.
+   In other words, return an RTX representing the place where a function returns a value. */
+static rtx
+flint_function_value (const_tree valtype,
+		     const_tree /* fn_decl_or_type */,
+		     bool /* outgoing */)
+{
+  return gen_rtx_REG(TYPE_MODE(valtype), RET_VAL_REG);
+}
+
 #if 0
 static void
 or1k_save_reg (int regno, HOST_WIDE_INT offset)
@@ -290,25 +300,53 @@ or1k_function_value_regno_p (const unsigned int regno)
 
 }
 
-static rtx
-or1k_function_arg (cumulative_args_t cum_v, const function_arg_info &arg)
-{
-
-}
-
-static void
-or1k_function_arg_advance (cumulative_args_t cum_v,
-			   const function_arg_info &arg)
-{
-
-}
-
 static bool
 or1k_return_in_memory (const_tree type, const_tree /* fntype */)
 {
 
 }
 #endif
+
+/* Updates the summariser variable pointer to by cum_v to advance past argument
+   arg in the list. Once this is done,t he variable cum is suitable for analysing 
+   the following argument with TARGET_FUNCTION_ARG, etc. */
+static void
+flint_function_arg_advance (cumulative_args_t cum_v,
+			   const function_arg_info &arg)
+{
+   CUMULATIVE_ARGS *cum = get_cumulative_args (cum_v);
+   int nreg = CEIL (GET_MODE_SIZE (arg.mode), UNITS_PER_WORD);
+
+  /* Note that all large arguments are passed by reference.
+      Check flint_function_arg. */
+  gcc_assert (nreg <= 2);
+  if (arg.named)
+    *cum += nreg;
+}
+
+/* Return an RTX indicating whether function arg is passed in a register and  if so,
+   which register. Argument cum_v (ca) summarises all the pervious arguments. */
+static rtx
+flint_function_arg (cumulative_args_t cum_v, const function_arg_info &arg)
+{
+   /* Handle the special marker for the end of the arguments.  */
+   if (arg.end_marker_p ())
+      return NULL_RTX;     
+
+   /* How many registers this argument will consume. On flint, UNITS_PER_WORD
+      is 4 (32-bit) meaning a 4-byte int is nreg=1 and an 8-byte long long is nreg=2. */
+   CUMULATIVE_ARGS *cum = get_cumulative_args (cum_v);
+   int nreg = CEIL (GET_MODE_SIZE (arg.mode), UNITS_PER_WORD);
+
+   /* No argument takes more than 2 registers */
+   gcc_assert (nreg <= 2);
+   /* Only named arguments go in registers. There is no varargs support in flint. */
+   if (arg.named && *cum + nreg <= 4)
+      /* The offset of 1 maps count to register number. */
+      return gen_rtx_REG (arg.mode, *cum + 1);     // Register number is *cum + 1
+   else
+      return NULL_RTX;
+}
 
 static void
 flint_compute_frame_layout(void)
@@ -332,13 +370,127 @@ flint_compute_frame_layout(void)
   cfun->machine->total_size = save_reg_size + local_vars_size + args_size;
 }
 
+/*
+   In flint, S-type instructions cannot store constants into addresses in a single instruction
+   because there is no immediate field. The imm field is only for offsets. I-type instructions
+   use an immediate field of 14 bits for a range of -8192 to +8191 so any constant outside that
+   range needs two instructions: lui followed by addi. flint also only has a single addressing 
+   mode: EA = rs1 + sext(imm); every load and store uses this form. 
+
+   Expand the patterns movqi, movhi and movsi.
+   - op0 = destination
+   - op1 = source
+*/
+void
+flint_expand_move(machine_mode mode, rtx op0, rtx op1)
+{
+   /* 
+      reg -> reg: ADD rd, rs, r0
+      mem -> reg: LW rd, imm(rs1)
+      reg -> mem: SW rs2, imm(rs1)
+      small const -> reg: ADDI rd, r0, imm
+      large const -> reg: [LUI rd, upper] then [ADDI rd, rd, lower]
+      const -> mem: [LW rd, imm(rs1)] then [ADD rd, rs, r0]
+   */
+
+   if (MEM_P(op0)) {
+      /* If destination is memory, check if source if a constant 0.
+         If not 0, then force it into a register. This is because you cannot 
+         store a constant integer directly into memory in a single instruction. */
+      if (!const0_operand(op1, mode))
+         op1 = force_reg(mode, op1);
+   } else if (mode == QImode || mode == HImode) {
+      /* Have not implemented byte/half-word byte moves here, all just fall
+         through to emit_insn at the bottom. */
+   } else {
+      switch (GET_CODE(op1)) {
+         case CONST_INT:
+            /* Check if const fits in the immediate field. If too large, special handling: */
+            if (!input_operand(op1, mode)) {
+	            HOST_WIDE_INT i = INTVAL(op1);
+               /* Extract low 14 bits and high 22 bits from source reg op1. */
+	            HOST_WIDE_INT lo = (i >> 14) & 0x3fff;
+	            HOST_WIDE_INT hi = i ^ lo;
+               /* If bit 13 of lo is 1, ADDI will sign extend as negative, 
+                  so add 1 to hi to compensate */
+               if (lo & 0x2000) hi += 1;
+
+               /* Check if it is safe to use new pseudos to 
+                  give the optimiser more freedom? */
+	            rtx subtarget = op0;
+	            if (!cse_not_expected && can_create_pseudo_p())
+                  subtarget = gen_reg_rtx(SImode);
+               
+               /* Emit RTL insn subtarget = hi bits */
+	            emit_insn(gen_rtx_SET(subtarget, GEN_INT(hi)));
+               /* Emit RTL insn subtarget += lo bits */
+	            emit_insn(
+                  gen_rtx_SET(
+                     op0, 
+                     (gen_rtx_PLUS(SImode, subtarget, GEN_INT(lo)))
+                  )
+               );
+	            return;
+            }
+            break;
+         default:
+            break;
+      }
+   }
+   emit_insn(gen_rtx_SET (op0, op1));
+}
+
+/* Worker for TARGET_PRINT_OPERAND_ADDRESS.
+   Prints the argument ADDR, an address RTX, to the file FILE.  The output is
+   formed as expected by the (non-existent) flint assembler.  Examples:
+
+     RTX							      OUTPUT
+     (reg:SI 3)							       0(r3)
+     (plus:SI (reg:SI 3) (const_int 4))				     0x4(r3)
+     (lo_sum:SI (reg:SI 3) (symbol_ref:SI ("x"))))		   lo(x)(r3)  */
+static void
+flint_print_operand_address (FILE *file, machine_mode, rtx addr)
+{
+  rtx offset;
+
+  switch (GET_CODE (addr)) {
+      case REG:
+         /* Output 0 for the offset (because there is no offset). */
+         fputc('0', file);
+         break;
+      case PLUS:
+         offset = XEXP(addr, 1);
+         addr = XEXP(addr, 0);
+         gcc_assert(CONST_INT_P (offset));
+         output_addr_const(file, offset);
+         break;
+    default:
+      output_addr_const (file, addr);
+      return;
+   }
+
+  fprintf (file, "(%s)", reg_names[REGNO (addr)]);
+}
+
 #define TARGET_HAVE_TLS false
+
+#undef TARGET_FUNCTION_ARG
+#define TARGET_FUNCTION_ARG flint_function_arg
+
+#undef TARGET_FUNCTION_ARG_ADVANCE
+#define TARGET_FUNCTION_ARG_ADVANCE flint_function_arg_advance
+
+#undef TARGET_FUNCTION_VALUE
+#define TARGET_FUNCTION_VALUE flint_function_value
 
 #undef  TARGET_COMPUTE_FRAME_LAYOUT
 #define TARGET_COMPUTE_FRAME_LAYOUT flint_compute_frame_layout
 
 #undef  TARGET_LEGITIMATE_ADDRESS_P
 #define TARGET_LEGITIMATE_ADDRESS_P flint_legitimate_address_p
+
+#undef TARGET_PRINT_OPERAND_ADDRESS 
+#define TARGET_PRINT_OPERAND_ADDRESS flint_print_operand_address
 
 struct gcc_target targetm = TARGET_INITIALIZER;
 

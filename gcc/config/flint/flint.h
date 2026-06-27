@@ -273,6 +273,7 @@ do {                                                    \
 #define FRAME_POINTER_REGNUM SFP_REGNUM
 #define HARD_FRAME_POINTER_REGNUM HFP_REGNUM
 #define STATIC_CHAIN_REGNUM SC_REGNUM
+#define RET_VAL_REG RET_VAL_REGNUM
 
 /* The register number of the arg pointer register, which is used to
    access the function's argument list.  */
