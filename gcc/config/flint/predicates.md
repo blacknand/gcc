@@ -48,3 +48,8 @@
        (and (match_code "const_int")
 	          (match_test "satisfies_constraint_I (op)"))
   ))
+
+(define_predicate "reg_or_imm14_operand"
+  (ior (match_operand 0 "register_operand")
+       (and (match_code "const_int")
+            (match_test "satisfies_constraint_I (op)"))))

@@ -472,6 +472,13 @@ flint_print_operand_address (FILE *file, machine_mode, rtx addr)
   fprintf (file, "(%s)", reg_names[REGNO (addr)]);
 }
 
+static rtx
+flint_libcall_value (machine_mode mode,
+		    const_rtx /* fun */)
+{
+  return gen_rtx_REG(mode, RET_VAL_REGNUM);
+}
+
 #define TARGET_HAVE_TLS false
 
 #undef TARGET_FUNCTION_ARG
@@ -491,6 +498,9 @@ flint_print_operand_address (FILE *file, machine_mode, rtx addr)
 
 #undef TARGET_PRINT_OPERAND_ADDRESS 
 #define TARGET_PRINT_OPERAND_ADDRESS flint_print_operand_address
+
+#undef TARGET_LIBCALL_VALUE
+#define TARGET_LIBCALL_VALUE flint_libcall_value
 
 struct gcc_target targetm = TARGET_INITIALIZER;
 

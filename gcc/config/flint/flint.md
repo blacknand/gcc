@@ -20,6 +20,19 @@
 ;; along with GCC; see the file COPYING3.  If not see
 ;; <http://www.gnu.org/licenses/>.
 
+;; i think a minimal backend requires:
+  ;; movsi, movqi, movhi (done)
+  ;; jump
+  ;; indirect_jump
+  ;; simple_return (done)
+  ;; call -- funcion call, void return
+  ;; call_value -- funcion call w return value
+  ;; nop (done)
+  ;; addsi3, subsi3, andsi3 iorsi3, xorsi3 -- arithmetic
+  ;; ashlsi3, lshri3, ashrsi3 -- shifts
+  ;; cbranchsi4 or individual beq/bne, etc. for branching
+  ;; prologue, epilogue, etc.
+
 ;; -------------------------------------------------------------------------
 ;; flint specific constraints, predicates and attributes
 ;; -------------------------------------------------------------------------
@@ -78,9 +91,6 @@
     addi %0, r0, %1
     l<I:ldst> %0, %a1
     s<I:ldst> %1, %a0")
-   ;; NOTE: no scheduler descritpion at all
-   ;; [(set_attr "type" "alu,alu,alu,alu,st,ld")]
-   
 
 ;; -------------------------------------------------------------------------
 ;; nop instruction
@@ -99,11 +109,52 @@
   [(parallel [(simple_return) (use (match_dup 0))])]
   ""
 {
-  operands[0] = gen_rtx_REG (Pmode, LR_REGNUM);
+  operands[0] = gen_rtx_REG(Pmode, LR_REGNUM);
 })
 
 (define_insn "*simple_return"
   [(simple_return)
-   (use (match_operand:SI 0 "register_operand" "r"))]
+  ;; %0 will be LR_REGNUM (r14)
+  (use (match_operand:SI 0 "register_operand" "r"))]
+  ""
+  "jalr r0, %0, 0")
+
+;; -------------------------------------------------------------------------
+;; Jump instructions
+;; -------------------------------------------------------------------------
+
+(define_insn "jump"
+  ;; Set the program counter to the value of the label (operand 0)
+  [(set (pc) (label_ref (match_operand 0 "" "")))]
+  ""
+  ;; jal rd, label
+  "jal r0, %0")
+
+(define_insn "indirect_jump"
+  ;; Set the program counter to the value of the register (operand 0)
+  [(set (pc) (match_operand:SI 0 "register_operand" "r"))]
+  ""
+  ;; jalr rd, rs1, imm
+  "jalr r0, %0, 0")
+
+;; -------------------------------------------------------------------------
+;; Arithmetic instructions
+;; -------------------------------------------------------------------------
+
+(define_insn "addsi3"
+  [(set (match_operand:SI 0 "register_operand" "=r,r")
+	  (plus:SI
+	   (match_operand:SI 1 "register_operand"   "%r,r")
+	   (match_operand:SI 2 "reg_or_imm14_operand" " r,I")))]
+  ""
   "@
-   jalr")
+   add %0, %1, %2
+   addi %0, %1, %2")
+
+(define_insn "subsi3"
+  [(set (match_operand:SI 0 "register_operand" "=r")
+	  (minus:SI
+	   (match_operand:SI 1 "register_operand" "r")
+	   (match_operand:SI 2 "register_operand" "r")))]
+  ""
+  "sub %0, %1, %2")
